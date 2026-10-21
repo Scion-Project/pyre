@@ -762,34 +762,28 @@ bool apple_boot_contains_boot_arg(const char* boot_args, const char* arg, bool m
     return false;
 }
 
-// SPTM boot info, as read by SPTM's start-up code (x0 on entry). The first
-// words match the XNU boot-args layout: SPTM loads them into x22/x23/x24 and
-// rounds phys_base up to 32 MiB exactly like XNU's start.s does.
-//   +0x000  version; SPTM requires >= 3 to take the handoff-region path
-//   +0x008  virt_base (VA that maps to phys_base)
-//   +0x010  phys_base
-//   +0x018  mem_size
-//   +0x480  pointer to a handoff region SPTM clears (0x17C0 bytes) and tags
-// The rest of the structure (region descriptors, page-table pool) is not
-// mapped out yet and is left zero.
-#define SPTM_BOOT_ARGS_VERSION     (0x000)
-#define SPTM_BOOT_ARGS_VIRT_BASE   (0x008)
-#define SPTM_BOOT_ARGS_PHYS_BASE   (0x010)
-#define SPTM_BOOT_ARGS_MEM_SIZE    (0x018)
+// SPTM boot info: the XNU boot-args structure (revision 3, 0x480 bytes)
+// followed by one pointer, 0x488 bytes in all. SPTM's start-up code checks
+// the first word is >= 3, loads virt_base/phys_base/mem_size and rounds them
+// like XNU's start.s, then copies exactly 0x488 bytes and walks the device
+// tree at +0x60/+0x68. The trailing pointer is a handoff region SPTM clears
+// (0x17C0 bytes) and tags before using.
 #define SPTM_BOOT_ARGS_HANDOFF_PTR (0x480)
 
-void apple_boot_setup_sptm_boot_args(AddressSpace* as, hwaddr addr, uint64_t version, vaddr virt_base,
-                                     hwaddr phys_base, hwaddr mem_size, hwaddr handoff_addr)
+void apple_boot_setup_sptm_boot_args(uint32_t build_version, AddressSpace* as, hwaddr addr, vaddr virt_base,
+                                     hwaddr phys_base, hwaddr mem_size, hwaddr kernel_top, vaddr dtb_va,
+                                     vaddr dtb_size, AppleVideoArgs* video_args, const char* cmdline,
+                                     hwaddr mem_size_actual, hwaddr handoff_addr)
 {
-    g_autofree uint8_t* buf = g_malloc0(SPTM_BOOT_ARGS_SIZE);
+    uint64_t handoff = cpu_to_le64(handoff_addr);
 
-    stq_le_p(buf + SPTM_BOOT_ARGS_VERSION, version);
-    stq_le_p(buf + SPTM_BOOT_ARGS_VIRT_BASE, virt_base);
-    stq_le_p(buf + SPTM_BOOT_ARGS_PHYS_BASE, phys_base);
-    stq_le_p(buf + SPTM_BOOT_ARGS_MEM_SIZE, mem_size);
-    stq_le_p(buf + SPTM_BOOT_ARGS_HANDOFF_PTR, handoff_addr);
+    QEMU_BUILD_BUG_ON(sizeof(AppleKernelBootArgsRev3) != SPTM_BOOT_ARGS_HANDOFF_PTR);
+    assert_cmpuint(BUILD_VERSION_MAJOR(build_version), >=, 17);
 
-    address_space_rw(as, addr, MEMTXATTRS_UNSPECIFIED, buf, SPTM_BOOT_ARGS_SIZE, true);
+    address_space_set(as, addr, 0, SPTM_BOOT_ARGS_SIZE, MEMTXATTRS_UNSPECIFIED);
+    apple_boot_setup_bootargs(build_version, as, addr, virt_base, phys_base, mem_size, kernel_top, dtb_va, dtb_size,
+                              video_args, cmdline, mem_size_actual);
+    address_space_write(as, addr + SPTM_BOOT_ARGS_HANDOFF_PTR, MEMTXATTRS_UNSPECIFIED, &handoff, sizeof(handoff));
 }
 
 void apple_boot_setup_monitor_boot_args(AddressSpace* as, hwaddr addr, vaddr virt_base, hwaddr phys_base,

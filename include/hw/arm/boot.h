@@ -417,9 +417,12 @@ bool apple_boot_contains_boot_arg(const char* boot_args, const char* arg, bool m
 /// SPTM clears 0x17C0 bytes of this region on entry.
 #define SPTM_HANDOFF_SIZE   (0x4000)
 
-/// Write a minimal SPTM boot-info page (see docs/ios27/SPTM-BOOT-SPEC.md in ios-on-pixel).
-void apple_boot_setup_sptm_boot_args(AddressSpace* as, hwaddr addr, uint64_t version, vaddr virt_base,
-                                     hwaddr phys_base, hwaddr mem_size, hwaddr handoff_addr);
+/// Write SPTM's boot info: the kernel boot-args (revision 3) followed by the
+/// handoff-region pointer (see docs/ios27/SPTM-BOOT-SPEC.md in ios-on-pixel).
+void apple_boot_setup_sptm_boot_args(uint32_t build_version, AddressSpace* as, hwaddr addr, vaddr virt_base,
+                                     hwaddr phys_base, hwaddr mem_size, hwaddr kernel_top, vaddr dtb_va,
+                                     vaddr dtb_size, AppleVideoArgs* video_args, const char* cmdline,
+                                     hwaddr mem_size_actual, hwaddr handoff_addr);
 
 void apple_boot_setup_monitor_boot_args(AddressSpace* as, hwaddr addr, vaddr virt_base, hwaddr phys_base,
                                         hwaddr mem_size, hwaddr kern_args, vaddr kern_entry, hwaddr kern_phys_base,

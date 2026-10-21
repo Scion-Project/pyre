@@ -584,8 +584,13 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
                               &t8030->video_args, cmdline, machine->ram_size);
 
     if (t8030->sptm != NULL) {
-        apple_boot_setup_sptm_boot_args(&address_space_memory, info->sptm_boot_args_addr, 3, info->sptm_virt_base,
-                                        g_phys_base, mem_size, info->sptm_handoff_addr);
+        // SPTM gets the kernel's boot arguments expressed in its own virtual
+        // frame (sptm_virt_base maps phys_base), plus the handoff page.
+        apple_boot_setup_sptm_boot_args(t8030->build_version, &address_space_memory, info->sptm_boot_args_addr,
+                                        info->sptm_virt_base, g_phys_base, mem_size, info->top_of_kernel_data_pa,
+                                        ptov_bases(info->device_tree_addr, g_phys_base, info->sptm_virt_base),
+                                        info->device_tree_size, &t8030->video_args, cmdline, machine->ram_size,
+                                        info->sptm_handoff_addr);
     }
 
     g_virt_base = kc_base;
