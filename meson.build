@@ -1355,7 +1355,7 @@ nettle = not_found
 hogweed = not_found
 xts = 'none'
 
-nettle = dependency('nettle', version: '>=3.9',
+nettle = dependency('nettle', version: '>=3.10',
                     method: 'pkg-config',
                     required: true)
 if not cc.has_header('nettle/xts.h', dependencies: nettle)
