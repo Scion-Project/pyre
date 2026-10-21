@@ -162,4 +162,6 @@ typedef struct
     bool            enable_pac;
     bool            patch_check;
     bool            gpu;
+    bool            audio;
+    char*           audiodev;
 } AppleT8030MachineState;
