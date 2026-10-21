@@ -906,6 +906,16 @@ MachoHeader64* apple_boot_load_kernel(const char* filename, MachoHeader64** secu
         return NULL;
     }
 
+    // Release builds compile out the asserts in apple_boot_parse_macho, so
+    // reject non-Mach-O payloads here instead of reading past the buffer.
+    if (len < sizeof(MachoHeader64) ||
+        ((MachoHeader64 *)data)->magic != MACH_MAGIC_64) {
+        error_setg(&error_fatal, "`%s` does not contain a 64-bit Mach-O kernel",
+                   filename);
+        g_free(data);
+        return NULL;
+    }
+
     header = apple_boot_parse_macho(data, len);
     g_free(data);
     return header;

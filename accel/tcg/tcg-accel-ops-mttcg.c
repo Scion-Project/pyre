@@ -28,6 +28,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/notify.h"
 #include "qemu/guest-random.h"
+#include "qemu/error-report.h"
 #include "hw/boards.h"
 #include "tcg/startup.h"
 #include "tcg-accel-ops.h"
@@ -68,6 +69,48 @@ static bool mttcg_exit_needs_bql(CPUState* cpu, int r)
     return cpu_thread_is_idle(cpu);
 }
 
+#ifdef CONFIG_LINUX
+/*
+ * QEMU_VCPU_AFFINITY="2-7;2-7;0-1" pins vCPU threads on big.LITTLE hosts:
+ * one host cpu-set per vCPU index, ';'-separated, with the last set reused
+ * for any higher index. Each set is a ','-list of cpus or lo-hi ranges.
+ */
+static void mttcg_set_vcpu_affinity(CPUState *cpu)
+{
+    const char *spec = g_getenv("QEMU_VCPU_AFFINITY");
+    g_auto(GStrv) sets = NULL;
+    g_auto(GStrv) parts = NULL;
+    cpu_set_t mask;
+    guint n;
+
+    if (!spec || !*spec) {
+        return;
+    }
+    sets = g_strsplit(spec, ";", -1);
+    n = g_strv_length(sets);
+    parts = g_strsplit(sets[MIN((guint)cpu->cpu_index, n - 1)], ",", -1);
+
+    CPU_ZERO(&mask);
+    for (char **p = parts; *p; p++) {
+        unsigned lo, hi;
+        int got = sscanf(*p, "%u-%u", &lo, &hi);
+
+        if (got == 1) {
+            hi = lo;
+        } else if (got != 2) {
+            continue;
+        }
+        for (unsigned c = lo; c <= hi && c < CPU_SETSIZE; c++) {
+            CPU_SET(c, &mask);
+        }
+    }
+    if (CPU_COUNT(&mask) && sched_setaffinity(0, sizeof(mask), &mask) < 0) {
+        warn_report("vCPU %d: cannot set affinity from QEMU_VCPU_AFFINITY: %s",
+                    cpu->cpu_index, strerror(errno));
+    }
+}
+#endif
+
 static void* mttcg_cpu_thread_fn(void* arg)
 {
     MttcgForceRcuNotifier force_rcu;
@@ -85,6 +128,9 @@ static void* mttcg_cpu_thread_fn(void* arg)
     qemu_thread_get_self(cpu->thread);
 
     cpu->thread_id = qemu_get_thread_id();
+#ifdef CONFIG_LINUX
+    mttcg_set_vcpu_affinity(cpu);
+#endif
     current_cpu    = cpu;
     cpu_thread_signal_created(cpu);
     qemu_guest_random_seed_thread_part2(cpu->random_seed);
