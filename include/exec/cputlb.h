@@ -223,6 +223,17 @@ void tlb_flush_pages_by_mmuidx_all_cpus_synced(CPUState* src_cpu, const TLBFlush
 void tlb_flush_asid_tagged_by_mmuidx(CPUState* cpu, MMUIdxMap idxmap);
 
 /**
+ * tlb_code_page_is_global:
+ * @cpu: CPU whose TLB to probe
+ * @addr: virtual address of an instruction
+ *
+ * Return true if the instruction-fetch TLB entry for @addr in the current
+ * mmu index is present and not ASID-tagged, i.e. it is kept by
+ * tlb_flush_asid_tagged_by_mmuidx(). Never fills the TLB.
+ */
+bool tlb_code_page_is_global(CPUState* cpu, vaddr addr);
+
+/**
  * tlb_flush_page_bits_by_mmuidx
  * @cpu: CPU whose TLB should be flushed
  * @addr: virtual address of page to be flushed
@@ -262,6 +273,7 @@ static inline void tlb_flush_by_mmuidx(CPUState* cpu, MMUIdxMap idxmap) { }
 static inline void tlb_flush_page_by_mmuidx_all_cpus_synced(CPUState* cpu, vaddr addr, MMUIdxMap idxmap) { }
 static inline void tlb_flush_by_mmuidx_all_cpus_synced(CPUState* cpu, MMUIdxMap idxmap) { }
 static inline void tlb_flush_asid_tagged_by_mmuidx(CPUState* cpu, MMUIdxMap idxmap) { }
+static inline bool tlb_code_page_is_global(CPUState* cpu, vaddr addr) { return false; }
 static inline void tlb_flush_pages_by_mmuidx_all_cpus_synced(CPUState* cpu, const TLBFlushPage* pages, unsigned n,
                                                              MMUIdxMap idxmap)
 { }
