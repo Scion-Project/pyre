@@ -644,6 +644,16 @@ typedef struct CPUArchState
         uint64_t esr_gl[4];
         uint64_t elr_gl[4];
         uint64_t far_gl[4];
+        /*
+         * iOS 27 SPTM/TXM/kernel touch a few Apple system registers in the
+         * GXF (op1=6, CRn=15) and EL2 impl-defined (op1=4, CRn=15) encoding
+         * spaces that are not individually modelled yet. They are backed as
+         * plain RW storage so guarded firmware does not UNDEF on them; exact
+         * semantics are still OPEN (see docs/ios27/GXF-GAP.md).
+         */
+        uint64_t gxf_ctl_misc[4]; /* [0]=S3_6_C15_C0_0 [1]=S3_6_C15_C2_0
+                                     [2]=S3_6_C15_C8_7 */
+        uint64_t apple_el2_impdef[16]; /* S3_4_C15_C{0,1,2}_* block */
     } gxf;
 
     struct
