@@ -646,8 +646,9 @@ MemoryRegionSection* address_space_translate_for_iotlb(CPUState* cpu, int asidx,
     IOMMUMemoryRegionClass* imrc;
     IOMMUTLBEntry           iotlb;
     int                     iommu_idx;
-    hwaddr                  addr = orig_addr;
-    AddressSpaceDispatch*   d    = address_space_to_dispatch(cpu->cpu_ases[asidx].as);
+    hwaddr                  addr      = orig_addr;
+    int                     orig_prot = *prot;
+    AddressSpaceDispatch*   d         = address_space_to_dispatch(cpu->cpu_ases[asidx].as);
 
     for (;;) {
         section = address_space_translate_internal(d, addr, &addr, plen, false);
@@ -694,6 +695,16 @@ translate_fail:
      */
     assert((orig_addr & ~TARGET_PAGE_MASK) == 0);
     *xlat = orig_addr;
+    /*
+     * The IOMMU denied every access. Keep the caller's permissions so the TLB
+     * entry is an ordinary I/O entry for the unassigned region: accesses then
+     * fail as a bus error that the guest takes (an external abort on Arm).
+     * With *prot left at 0, tlb_set_page_full() would write an entry that
+     * matches no access type, and the TLB lookup that just filled it would
+     * then treat it as RAM with addend 0, turning the guest address into a
+     * bogus host pointer ("Bad ram pointer", or a stray host access).
+     */
+    *prot = orig_prot;
     return &d->map.sections[PHYS_SECTION_UNASSIGNED];
 }
 

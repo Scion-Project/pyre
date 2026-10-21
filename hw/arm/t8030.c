@@ -555,6 +555,8 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
             error_setg(&error_fatal, "Failed to read SEP Firmware from `%s`", t8030->sep_fw_filename);
             return;
         }
+        apple_sep_check_image("SEP firmware", t8030->sep_fw_filename, fw_data, sep_fw_size, SEPFW_MAPPING_SIZE,
+                              &error_fatal);
         apple_sep_set_fw(sep, info->sep_fw_addr, fw_data, sep_fw_size);
     }
 
@@ -675,6 +677,7 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
             error_setg(&error_fatal, "Could not load data from file '%s'", t8030->sep_rom_filename);
             return;
         }
+        apple_sep_check_image("SEP ROM", t8030->sep_rom_filename, seprom, fsize, SEPROM_SIZE, &error_fatal);
 
         seprom_range = ck_patcher_range_from_ptr("seprom", seprom, fsize);
         ck_sep_seprom_patches(seprom_range);
