@@ -32,20 +32,6 @@ static CPAccessResult access_gxf(CPUARMState* env, const ARMCPRegInfo* ri, bool 
     return CP_ACCESS_TRAP_EL1;
 }
 
-static uint64_t tpidr_el1_read(CPUARMState* env, const ARMCPRegInfo* ri)
-{
-    if (arm_is_guarded(env)) { return env->gxf.tpidr_gl[1]; }
-    return env->cp15.tpidr_el[1];
-}
-
-static void tpidr_el1_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t value)
-{
-    if (arm_is_guarded(env)) { env->gxf.tpidr_gl[1] = value; }
-    else {
-        env->cp15.tpidr_el[1] = value;
-    }
-}
-
 static uint64_t vbar_el1_read(CPUARMState* env, const ARMCPRegInfo* ri)
 {
     if (arm_is_guarded(env)) { return env->gxf.vbar_gl[1]; }
@@ -57,62 +43,6 @@ static void vbar_el1_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t va
     if (arm_is_guarded(env)) { env->gxf.vbar_gl[1] = value & ~0x1FULL; }
     else if (!(env->cp15.vmsa_lock_el1 & VMSA_LOCK_VBAR_EL1)) {
         raw_write(env, ri, value & ~0x1FULL);
-    }
-}
-
-static uint64_t spsr_el1_read(CPUARMState* env, const ARMCPRegInfo* ri)
-{
-    if (arm_is_guarded(env)) { return env->gxf.spsr_gl[1]; }
-    return env->banked_spsr[BANK_SVC];
-}
-
-static void spsr_el1_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t value)
-{
-    if (arm_is_guarded(env)) { env->gxf.spsr_gl[1] = value; }
-    else {
-        env->banked_spsr[BANK_SVC] = value;
-    }
-}
-
-static uint64_t elr_el1_read(CPUARMState* env, const ARMCPRegInfo* ri)
-{
-    if (arm_is_guarded(env)) { return env->gxf.elr_gl[1]; }
-    return env->elr_el[1];
-}
-
-static void elr_el1_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t value)
-{
-    if (arm_is_guarded(env)) { env->gxf.elr_gl[1] = value; }
-    else {
-        env->elr_el[1] = value;
-    }
-}
-
-static uint64_t esr_el1_read(CPUARMState* env, const ARMCPRegInfo* ri)
-{
-    if (arm_is_guarded(env)) { return env->gxf.esr_gl[1]; }
-    return env->cp15.esr_el[1];
-}
-
-static void esr_el1_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t value)
-{
-    if (arm_is_guarded(env)) { env->gxf.esr_gl[1] = value; }
-    else {
-        env->cp15.esr_el[1] = value;
-    }
-}
-
-static uint64_t far_el1_read(CPUARMState* env, const ARMCPRegInfo* ri)
-{
-    if (arm_is_guarded(env)) { return env->gxf.far_gl[1]; }
-    return env->cp15.far_el[1];
-}
-
-static void far_el1_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t value)
-{
-    if (arm_is_guarded(env)) { env->gxf.far_gl[1] = value; }
-    else {
-        env->cp15.far_el[1] = value;
     }
 }
 
@@ -156,21 +86,20 @@ static void gxf_cpreg_raw_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64
 
 static const ARMCPRegInfo apple_a13_gxf_cp_override_reginfo[] = {
     {
-        .name        = "TPIDR_EL1",
-        .state       = ARM_CP_STATE_AA64,
-        .opc0        = 3,
-        .opc1        = 0,
-        .opc2        = 4,
-        .crn         = 13,
-        .crm         = 0,
-        .access      = PL1_RW,
-        .type        = ARM_CP_OVERRIDE,
-        .readfn      = tpidr_el1_read,
-        .writefn     = tpidr_el1_write,
-        .raw_readfn  = raw_read,
-        .raw_writefn = raw_write,
-        .fieldoffset = offsetof(CPUARMState, cp15.tpidr_el[1]),
-        .resetvalue  = 0,
+        .name            = "TPIDR_EL1",
+        .state           = ARM_CP_STATE_AA64,
+        .opc0            = 3,
+        .opc1            = 0,
+        .opc2            = 4,
+        .crn             = 13,
+        .crm             = 0,
+        .access          = PL1_RW,
+        .type            = ARM_CP_OVERRIDE,
+        .gxf_fieldoffset = offsetof(CPUARMState, gxf.tpidr_gl[1]),
+        .raw_readfn      = raw_read,
+        .raw_writefn     = raw_write,
+        .fieldoffset     = offsetof(CPUARMState, cp15.tpidr_el[1]),
+        .resetvalue      = 0,
     },
     {
         .name              = "VBAR",
@@ -190,74 +119,70 @@ static const ARMCPRegInfo apple_a13_gxf_cp_override_reginfo[] = {
         .resetvalue        = 0,
     },
     {
-        .name        = "SPSR_EL1",
-        .state       = ARM_CP_STATE_AA64,
-        .type        = ARM_CP_ALIAS | ARM_CP_OVERRIDE,
-        .opc0        = 3,
-        .opc1        = 0,
-        .crn         = 4,
-        .crm         = 0,
-        .opc2        = 0,
-        .access      = PL1_RW,
-        .raw_readfn  = raw_read,
-        .raw_writefn = raw_write,
-        .fieldoffset = offsetof(CPUARMState, banked_spsr[BANK_SVC]),
-        .readfn      = spsr_el1_read,
-        .writefn     = spsr_el1_write,
-        .resetvalue  = 0,
+        .name            = "SPSR_EL1",
+        .state           = ARM_CP_STATE_AA64,
+        .type            = ARM_CP_ALIAS | ARM_CP_OVERRIDE,
+        .opc0            = 3,
+        .opc1            = 0,
+        .crn             = 4,
+        .crm             = 0,
+        .opc2            = 0,
+        .access          = PL1_RW,
+        .raw_readfn      = raw_read,
+        .raw_writefn     = raw_write,
+        .fieldoffset     = offsetof(CPUARMState, banked_spsr[BANK_SVC]),
+        .gxf_fieldoffset = offsetof(CPUARMState, gxf.spsr_gl[1]),
+        .resetvalue      = 0,
     },
     {
-        .name        = "ELR_EL1",
-        .state       = ARM_CP_STATE_AA64,
-        .type        = ARM_CP_ALIAS | ARM_CP_OVERRIDE,
-        .opc0        = 3,
-        .opc1        = 0,
-        .crn         = 4,
-        .crm         = 0,
-        .opc2        = 1,
-        .access      = PL1_RW,
-        .raw_readfn  = raw_read,
-        .raw_writefn = raw_write,
-        .fieldoffset = offsetof(CPUARMState, elr_el[1]),
-        .readfn      = elr_el1_read,
-        .writefn     = elr_el1_write,
-        .resetvalue  = 0,
+        .name            = "ELR_EL1",
+        .state           = ARM_CP_STATE_AA64,
+        .type            = ARM_CP_ALIAS | ARM_CP_OVERRIDE,
+        .opc0            = 3,
+        .opc1            = 0,
+        .crn             = 4,
+        .crm             = 0,
+        .opc2            = 1,
+        .access          = PL1_RW,
+        .raw_readfn      = raw_read,
+        .raw_writefn     = raw_write,
+        .fieldoffset     = offsetof(CPUARMState, elr_el[1]),
+        .gxf_fieldoffset = offsetof(CPUARMState, gxf.elr_gl[1]),
+        .resetvalue      = 0,
     },
     {
-        .name        = "ESR_EL1",
-        .state       = ARM_CP_STATE_AA64,
-        .opc0        = 3,
-        .crn         = 5,
-        .crm         = 2,
-        .opc1        = 0,
-        .opc2        = 0,
-        .access      = PL1_RW,
-        .type        = ARM_CP_OVERRIDE,
-        .accessfn    = access_tvm_trvm,
-        .raw_readfn  = raw_read,
-        .raw_writefn = raw_write,
-        .fieldoffset = offsetof(CPUARMState, cp15.esr_el[1]),
-        .readfn      = esr_el1_read,
-        .writefn     = esr_el1_write,
-        .resetvalue  = 0,
+        .name            = "ESR_EL1",
+        .state           = ARM_CP_STATE_AA64,
+        .opc0            = 3,
+        .crn             = 5,
+        .crm             = 2,
+        .opc1            = 0,
+        .opc2            = 0,
+        .access          = PL1_RW,
+        .type            = ARM_CP_OVERRIDE,
+        .accessfn        = access_tvm_trvm,
+        .raw_readfn      = raw_read,
+        .raw_writefn     = raw_write,
+        .fieldoffset     = offsetof(CPUARMState, cp15.esr_el[1]),
+        .gxf_fieldoffset = offsetof(CPUARMState, gxf.esr_gl[1]),
+        .resetvalue      = 0,
     },
     {
-        .name        = "FAR_EL1",
-        .state       = ARM_CP_STATE_AA64,
-        .opc0        = 3,
-        .crn         = 6,
-        .crm         = 0,
-        .opc1        = 0,
-        .opc2        = 0,
-        .type        = ARM_CP_OVERRIDE,
-        .access      = PL1_RW,
-        .accessfn    = access_tvm_trvm,
-        .raw_readfn  = raw_read,
-        .raw_writefn = raw_write,
-        .fieldoffset = offsetof(CPUARMState, cp15.far_el[1]),
-        .readfn      = far_el1_read,
-        .writefn     = far_el1_write,
-        .resetvalue  = 0,
+        .name            = "FAR_EL1",
+        .state           = ARM_CP_STATE_AA64,
+        .opc0            = 3,
+        .crn             = 6,
+        .crm             = 0,
+        .opc1            = 0,
+        .opc2            = 0,
+        .type            = ARM_CP_OVERRIDE,
+        .access          = PL1_RW,
+        .accessfn        = access_tvm_trvm,
+        .raw_readfn      = raw_read,
+        .raw_writefn     = raw_write,
+        .fieldoffset     = offsetof(CPUARMState, cp15.far_el[1]),
+        .gxf_fieldoffset = offsetof(CPUARMState, gxf.far_gl[1]),
+        .resetvalue      = 0,
     },
 };
 
