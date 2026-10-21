@@ -25,6 +25,9 @@
 #include "hw/arm/dt.h"
 #include "system/memory.h"
 
+/// Size SPTM requires of /chosen/cl4-entropy (copied, then cleared).
+#define SPTM_CL4_ENTROPY_SIZE (0xc0)
+
 /*
  * Segment classes, named by the suffix iBoot gives the matching
  * /chosen/memory-map property ("<image>-<suffix>", e.g. "BootKC-rx").

@@ -288,22 +288,39 @@ static void t8030_populate_sptm_dt(AppleT8030MachineState* t8030)
         apple_dt_set_prop_null(dart_sep, "allow-vm-reserve-mapping");
     }
 
+    // SPTM copies /chosen/cl4-entropy (the exclaves kernel's entropy) into
+    // its own data at boot and panics ("Not enough SK entropy") unless the
+    // property is exactly 0xc0 bytes. iBoot fills it in; size it here and
+    // fill it on every SPTM boot (t8030_load_kernelcache_sptm).
+    {
+        AppleDTProp* prop = apple_dt_get_prop(chosen, "cl4-entropy");
+
+        if (prop == NULL || prop->len != SPTM_CL4_ENTROPY_SIZE) {
+            apple_dt_set_prop(chosen, "cl4-entropy", SPTM_CL4_ENTROPY_SIZE, NULL);
+        }
+    }
+
     info_report("t8030: populated iOS 27 TXM / secure-boot device-tree properties");
 }
 
 // `-M t8030,patch-check=on -kernel <kc>`: apply the kernel patches in memory,
 // report which ones matched, then exit. Needs nothing but the kernel, so new
 // releases can be triaged before the rest of the boot chain supports them.
+static void t8030_sptm_layout_check(AppleT8030MachineState* t8030, MachoHeader64* kernel);
+
 static void t8030_kernel_patch_check(MachineState* machine)
 {
-    MachoHeader64* kernel = apple_boot_load_kernel(machine->kernel_filename, NULL);
-    uint32_t       build_version;
-    vaddr          kc_end;
+    AppleT8030MachineState* t8030  = APPLE_T8030(machine);
+    MachoHeader64*          kernel = apple_boot_load_kernel(machine->kernel_filename, NULL);
+    uint32_t                build_version;
+    vaddr                   kc_end;
 
     build_version = apple_boot_build_version(kernel);
     info_report("patch-check: %s %u.%u.%u, SPTM/TXM: %s", apple_boot_platform_string(kernel),
                 BUILD_VERSION_MAJOR(build_version), BUILD_VERSION_MINOR(build_version),
                 BUILD_VERSION_PATCH(build_version), t8030_kernel_uses_sptm(kernel) ? "yes" : "no");
+
+    if (t8030->sptm_filename != NULL && t8030->txm_filename != NULL) { t8030_sptm_layout_check(t8030, kernel); }
 
     apple_boot_get_kc_bounds(kernel, NULL, &g_virt_base, &kc_end, NULL, NULL);
     g_phys_base = (hwaddr)apple_boot_get_macho_buffer(kernel);
@@ -452,6 +469,74 @@ static void t8030_report_sptm_layout(const AppleSptmLayout* l, const AppleBootIn
                 info->sptm_boot_args_addr, info->sptm_handoff_addr, info->kern_boot_args_addr);
 }
 
+static void t8030_set_range(AppleDTNode* node, const char* name, uint64_t addr, uint64_t size)
+{
+    uint8_t value[16];
+
+    stq_le_p(value, addr);
+    stq_le_p(value + 8, size);
+    apple_dt_set_prop(node, name, sizeof(value), value);
+}
+
+// patch-check with `sptm=` and `txm=`: lay the three images out as an SPTM
+// boot would, publish the image regions into a scratch memory-map, and run
+// SPTM's region checks on it. Needs no device tree, so the layout can be
+// checked against new firmware before anything boots. The DeviceTree and
+// TrustCache sizes are stand-ins (one and four pages).
+static void t8030_sptm_layout_check(AppleT8030MachineState* t8030, MachoHeader64* kernel)
+{
+    AppleSptmLayout layout;
+    AppleBootInfo   info = {0};
+    AppleDTNode*    root;
+    AppleDTNode*    memory_map;
+    MachoHeader64*  sptm;
+    MachoHeader64*  txm;
+    Error*          err = NULL;
+
+    sptm = apple_boot_load_monitor(t8030->sptm_filename, "sptm");
+    txm  = apple_boot_load_monitor(t8030->txm_filename, "trxm");
+    if (sptm == NULL || txm == NULL) {
+        error_report("patch-check: SPTM layout: failed to load SPTM/TXM");
+        exit(1);
+    }
+
+    root       = apple_dt_node_new(NULL, NULL);
+    memory_map = apple_dt_node_new(apple_dt_node_new(root, "chosen"), "memory-map");
+
+    apple_sptm_layout_init(&layout, sptm, txm, kernel);
+    apple_sptm_allocate_memory_map(memory_map, &layout);
+    apple_sptm_layout_place(&layout, DRAM_BASE, L2_GRANULE, 4 * 0x4000, 0x4000);
+    apple_sptm_publish_memory_map(memory_map, &layout, 0);
+
+    // What apple_boot_finalise_dt() publishes on a real boot.
+    info.device_tree_addr    = layout.device_tree.pa;
+    info.trustcache_addr     = layout.trustcache.pa;
+    info.sptm_entry          = apple_sptm_entry_pa(&layout.sptm);
+    info.txm_entry           = apple_sptm_entry_pa(&layout.txm);
+    info.kern_entry          = apple_sptm_entry_pa(&layout.kc);
+    info.kern_boot_args_addr = layout.end;
+    t8030_set_range(memory_map, "DeviceTree", layout.device_tree.pa, layout.device_tree.size);
+    t8030_set_range(memory_map, "TrustCache", layout.trustcache.pa, layout.trustcache.size);
+    t8030_set_range(memory_map, "BootArgs", layout.end, 0x4000);
+
+    t8030_report_sptm_layout(&layout, &info);
+    if (!apple_sptm_check_memory_map(memory_map, &err)) {
+        error_reportf_err(err, "patch-check: SPTM layout: ");
+        exit(1);
+    }
+    info_report("patch-check: SPTM layout: the image regions pass SPTM's checks");
+}
+
+// Fresh entropy for SPTM on every boot: SPTM copies /chosen/cl4-entropy
+// and clears the guest copy (see t8030_populate_sptm_dt).
+static void t8030_fill_sptm_entropy(AppleT8030MachineState* t8030)
+{
+    AppleDTProp* prop = apple_dt_get_prop(apple_dt_get_node(t8030->device_tree, "chosen"), "cl4-entropy");
+
+    assert_nonnull(prop);
+    qemu_guest_getrandom_nofail(prop->data, prop->len);
+}
+
 // iOS 27+ (`sptm=`): place the images the way iBoot does on SPTM devices
 // (see hw/arm/sptm-boot.c) instead of mapping the kernelcache linearly, and
 // publish the /chosen/memory-map image regions SPTM looks up. The boot CPU
@@ -548,6 +633,7 @@ static void t8030_load_kernelcache_sptm(AppleT8030MachineState* t8030, const cha
 
     t8030_report_sptm_layout(layout, info);
 
+    t8030_fill_sptm_entropy(t8030);
     apple_sptm_publish_memory_map(memory_map, layout, g_virt_slide);
     apple_boot_finalise_dt(t8030->device_tree, &address_space_memory, info);
     if (!apple_sptm_check_memory_map(memory_map, &err)) {
