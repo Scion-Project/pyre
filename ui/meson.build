@@ -18,6 +18,7 @@ system_ss.add(files(
 system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))
 
 system_ss.add(when: cocoa, if_true: files('cocoa.m'))
+system_ss.add(when: nativewindow, if_true: [files('android.c'), pixman])
 
 vnc_ss = ss.source_set()
 vnc_ss.add(files(

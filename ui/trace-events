@@ -23,6 +23,9 @@ gd_ungrab(const char *tab, const char *device) "tab=%s, dev=%s"
 gd_keymap_windowing(const char *name) "backend=%s"
 gd_motion_event(int ww, int wh, int ws, int x, int y) "ww=%d, wh=%d, ws=%d, x=%d, y=%d"
 
+# android.c
+android_display_post(int x, int y, int w, int h, int64_t post_ns, int64_t wait_ns) "x=%d y=%d w=%d h=%d post=%" PRId64 "ns waited=%" PRId64 "ns"
+
 # vnc-auth-sasl.c
 # vnc-auth-vencrypt.c
 # vnc-ws.c
