@@ -2110,6 +2110,13 @@ static void gen_sysreg_undef(DisasContext* s, bool isread, uint8_t op0, uint8_t 
  * These are all essentially the same insn in 'read' and 'write'
  * versions, with varying op0 fields.
  */
+/*
+ * The CPUARMState field of a register accessed with a plain load or store
+ * (no readfn/writefn), for this TB's GXF state.
+ */
+static ptrdiff_t cpreg_field_offset(DisasContext* s, const ARMCPRegInfo* ri)
+{ return s->guarded && ri->gxf_fieldoffset ? ri->gxf_fieldoffset : ri->fieldoffset; }
+
 static void handle_sys(DisasContext* s, bool isread, unsigned int op0, unsigned int op1, unsigned int op2,
                        unsigned int crn, unsigned int crm, unsigned int rt)
 {
@@ -2383,7 +2390,7 @@ static void handle_sys(DisasContext* s, bool isread, unsigned int op0, unsigned 
             gen_helper_get_cp_reg64(tcg_rt, tcg_env, tcg_ri);
         }
         else {
-            tcg_gen_ld_i64(tcg_rt, tcg_env, ri->fieldoffset);
+            tcg_gen_ld_i64(tcg_rt, tcg_env, cpreg_field_offset(s, ri));
         }
     }
     else {
@@ -2396,7 +2403,7 @@ static void handle_sys(DisasContext* s, bool isread, unsigned int op0, unsigned 
             gen_helper_set_cp_reg64(tcg_env, tcg_ri, tcg_rt);
         }
         else {
-            tcg_gen_st_i64(tcg_rt, tcg_env, ri->fieldoffset);
+            tcg_gen_st_i64(tcg_rt, tcg_env, cpreg_field_offset(s, ri));
         }
     }
 
