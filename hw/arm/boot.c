@@ -24,7 +24,6 @@
 #include "hw/arm/dt.h"
 #include "hw/arm/mem.h"
 #include "qapi/error.h"
-#include "qemu/bswap.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/guest-random.h"
