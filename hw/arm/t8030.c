@@ -28,6 +28,7 @@
 #include "hw/arm/mem.h"
 #include "hw/input/mt-spi.h"
 #include "hw/arm/sart.h"
+#include "hw/arm/sptm-boot.h"
 #include "hw/arm/sep/sim.h"
 #include "hw/arm/sep/emu.h"
 #include "hw/arm/t8030-config.c.inc"
@@ -287,22 +288,39 @@ static void t8030_populate_sptm_dt(AppleT8030MachineState* t8030)
         apple_dt_set_prop_null(dart_sep, "allow-vm-reserve-mapping");
     }
 
+    // SPTM copies /chosen/cl4-entropy (the exclaves kernel's entropy) into
+    // its own data at boot and panics ("Not enough SK entropy") unless the
+    // property is exactly 0xc0 bytes. iBoot fills it in; size it here and
+    // fill it on every SPTM boot (t8030_load_kernelcache_sptm).
+    {
+        AppleDTProp* prop = apple_dt_get_prop(chosen, "cl4-entropy");
+
+        if (prop == NULL || prop->len != SPTM_CL4_ENTROPY_SIZE) {
+            apple_dt_set_prop(chosen, "cl4-entropy", SPTM_CL4_ENTROPY_SIZE, NULL);
+        }
+    }
+
     info_report("t8030: populated iOS 27 TXM / secure-boot device-tree properties");
 }
 
 // `-M t8030,patch-check=on -kernel <kc>`: apply the kernel patches in memory,
 // report which ones matched, then exit. Needs nothing but the kernel, so new
 // releases can be triaged before the rest of the boot chain supports them.
+static void t8030_sptm_layout_check(AppleT8030MachineState* t8030, MachoHeader64* kernel);
+
 static void t8030_kernel_patch_check(MachineState* machine)
 {
-    MachoHeader64* kernel = apple_boot_load_kernel(machine->kernel_filename, NULL);
-    uint32_t       build_version;
-    vaddr          kc_end;
+    AppleT8030MachineState* t8030  = APPLE_T8030(machine);
+    MachoHeader64*          kernel = apple_boot_load_kernel(machine->kernel_filename, NULL);
+    uint32_t                build_version;
+    vaddr                   kc_end;
 
     build_version = apple_boot_build_version(kernel);
     info_report("patch-check: %s %u.%u.%u, SPTM/TXM: %s", apple_boot_platform_string(kernel),
                 BUILD_VERSION_MAJOR(build_version), BUILD_VERSION_MINOR(build_version),
                 BUILD_VERSION_PATCH(build_version), t8030_kernel_uses_sptm(kernel) ? "yes" : "no");
+
+    if (t8030->sptm_filename != NULL && t8030->txm_filename != NULL) { t8030_sptm_layout_check(t8030, kernel); }
 
     apple_boot_get_kc_bounds(kernel, NULL, &g_virt_base, &kc_end, NULL, NULL);
     g_phys_base = (hwaddr)apple_boot_get_macho_buffer(kernel);
@@ -399,15 +417,6 @@ static hwaddr t8030_map_monitor(MachoHeader64* hdr, hwaddr phys_base)
     return entry;
 }
 
-// Lowest physical address >= `min_pa` that is congruent to `va` modulo
-// `modulus` (a power of two).
-static hwaddr t8030_congruent_pa(hwaddr min_pa, vaddr va, hwaddr modulus)
-{
-    hwaddr off = va & (modulus - 1);
-
-    return ROUND_UP(min_pa - off, modulus) + off;
-}
-
 static void t8030_report_layout(AppleBootInfo* info, hwaddr kernel_start, hwaddr kernel_end, bool sptm, bool txm)
 {
     info_report("Boot layout (physical):");
@@ -432,6 +441,247 @@ static void t8030_report_layout(AppleBootInfo* info, hwaddr kernel_start, hwaddr
     }
 }
 
+static void t8030_report_sptm_region(const char* prefix, const char* cls, const AppleSptmRegion* r)
+{
+    if (r->size == 0) { return; }
+    info_report("  %-6s %-2s  0x" HWADDR_FMT_plx " - 0x" HWADDR_FMT_plx "  (link 0x%016" VADDR_PRIx ")", prefix, cls,
+                r->pa, r->pa + r->size, r->va);
+}
+
+static void t8030_report_sptm_layout(const AppleSptmLayout* l, const AppleBootInfo* info)
+{
+    static const char* const cls[APPLE_SPTM_CLASS_COUNT] = {"ro", "rx", "bx", "rs", "rw", "rm", "le"};
+    const AppleSptmImage* const images[] = {&l->txm, &l->kc, &l->sptm};
+
+    info_report("SPTM boot layout (physical; region chain 0x" HWADDR_FMT_plx " - 0x" HWADDR_FMT_plx "):",
+                l->chain_start, l->chain_end);
+    for (size_t i = 0; i < ARRAY_SIZE(images); ++i) {
+        for (int c = 0; c < APPLE_SPTM_CLASS_COUNT; ++c) {
+            t8030_report_sptm_region(images[i]->prefix, cls[c], &images[i]->region[c]);
+        }
+    }
+    t8030_report_sptm_region("Trust", "-", &l->trustcache);
+    t8030_report_sptm_region("CL4", "rx", &l->cl4_rx);
+    t8030_report_sptm_region("DT", "-", &l->device_tree);
+    info_report("  entries: SPTM 0x" HWADDR_FMT_plx ", TXM 0x" HWADDR_FMT_plx ", kernel 0x" HWADDR_FMT_plx,
+                info->sptm_entry, info->txm_entry, info->kern_entry);
+    info_report("  SPTM boot info 0x" HWADDR_FMT_plx ", handoff 0x" HWADDR_FMT_plx ", kernel boot-args 0x" HWADDR_FMT_plx,
+                info->sptm_boot_args_addr, info->sptm_handoff_addr, info->kern_boot_args_addr);
+}
+
+static void t8030_set_range(AppleDTNode* node, const char* name, uint64_t addr, uint64_t size)
+{
+    uint8_t value[16];
+
+    stq_le_p(value, addr);
+    stq_le_p(value + 8, size);
+    apple_dt_set_prop(node, name, sizeof(value), value);
+}
+
+// patch-check with `sptm=` and `txm=`: lay the three images out as an SPTM
+// boot would, publish the image regions into a scratch memory-map, and run
+// SPTM's region checks on it. Needs no device tree, so the layout can be
+// checked against new firmware before anything boots. The DeviceTree and
+// TrustCache sizes are stand-ins (one and four pages).
+static void t8030_sptm_layout_check(AppleT8030MachineState* t8030, MachoHeader64* kernel)
+{
+    AppleSptmLayout layout;
+    AppleBootInfo   info = {0};
+    AppleDTNode*    root;
+    AppleDTNode*    memory_map;
+    MachoHeader64*  sptm;
+    MachoHeader64*  txm;
+    Error*          err = NULL;
+
+    sptm = apple_boot_load_monitor(t8030->sptm_filename, "sptm");
+    txm  = apple_boot_load_monitor(t8030->txm_filename, "trxm");
+    if (sptm == NULL || txm == NULL) {
+        error_report("patch-check: SPTM layout: failed to load SPTM/TXM");
+        exit(1);
+    }
+
+    root       = apple_dt_node_new(NULL, NULL);
+    memory_map = apple_dt_node_new(apple_dt_node_new(root, "chosen"), "memory-map");
+
+    apple_sptm_layout_init(&layout, sptm, txm, kernel);
+    apple_sptm_allocate_memory_map(memory_map, &layout);
+    apple_sptm_layout_place(&layout, DRAM_BASE, L2_GRANULE, 4 * 0x4000, 0x4000);
+    apple_sptm_publish_memory_map(memory_map, &layout, 0);
+
+    // What apple_boot_finalise_dt() publishes on a real boot.
+    info.device_tree_addr    = layout.device_tree.pa;
+    info.trustcache_addr     = layout.trustcache.pa;
+    info.sptm_entry          = apple_sptm_entry_pa(&layout.sptm);
+    info.txm_entry           = apple_sptm_entry_pa(&layout.txm);
+    info.kern_entry          = apple_sptm_entry_pa(&layout.kc);
+    info.kern_boot_args_addr = layout.end;
+    t8030_set_range(memory_map, "DeviceTree", layout.device_tree.pa, layout.device_tree.size);
+    t8030_set_range(memory_map, "TrustCache", layout.trustcache.pa, layout.trustcache.size);
+    t8030_set_range(memory_map, "BootArgs", layout.end, 0x4000);
+
+    t8030_report_sptm_layout(&layout, &info);
+    if (!apple_sptm_check_memory_map(memory_map, &err)) {
+        error_reportf_err(err, "patch-check: SPTM layout: ");
+        exit(1);
+    }
+    info_report("patch-check: SPTM layout: the image regions pass SPTM's checks");
+}
+
+// Fresh entropy for SPTM on every boot: SPTM copies /chosen/cl4-entropy
+// and clears the guest copy (see t8030_populate_sptm_dt).
+static void t8030_fill_sptm_entropy(AppleT8030MachineState* t8030)
+{
+    AppleDTProp* prop = apple_dt_get_prop(apple_dt_get_node(t8030->device_tree, "chosen"), "cl4-entropy");
+
+    assert_nonnull(prop);
+    qemu_guest_getrandom_nofail(prop->data, prop->len);
+}
+
+// iOS 27+ (`sptm=`): place the images the way iBoot does on SPTM devices
+// (see hw/arm/sptm-boot.c) instead of mapping the kernelcache linearly, and
+// publish the /chosen/memory-map image regions SPTM looks up. The boot CPU
+// enters SPTM (t8030_cpu_reset), which launches TXM and enters the kernel.
+// Only used when an SPTM image is given; other boots never get here.
+static void t8030_load_kernelcache_sptm(AppleT8030MachineState* t8030, const char* cmdline, CarveoutAllocator* ca)
+{
+    MachineState*          machine    = MACHINE(t8030);
+    AppleBootInfo*         info       = &t8030->boot_info;
+    AppleSptmLayout*       layout     = &t8030->sptm_layout;
+    AppleDTNode*           memory_map = apple_dt_get_node(t8030->device_tree, "/chosen/memory-map");
+    const AppleSptmRegion* kc_rw;
+    const AppleSptmRegion* sptm_ro;
+    vaddr                  kc_base;
+    vaddr                  kernel_virt_base;
+    hwaddr                 phys_ptr;
+    hwaddr                 mem_size;
+    Error*                 err = NULL;
+
+    // SPTM applies the kernel's slide itself (it walks the kernel's chained
+    // fixups and passes "slide" on to XNU). Boot unslid until that path has
+    // been exercised.
+    g_phys_slide = 0;
+    g_virt_slide = 0;
+    g_phys_base  = DRAM_BASE;
+
+    apple_sptm_layout_place(layout, DRAM_BASE, L2_GRANULE, info->trustcache_size, info->device_tree_size);
+    apple_sptm_layout_load(layout, &address_space_memory, t8030->trustcache, info->trustcache_size);
+
+    // The kernel's boot-args frame (virtBase <-> physBase). XNU derives the
+    // physical address of __DATA objects (e.g. BootCpuData) as
+    // physBase + (va - virtBase), so anchor the frame on BootKC-rw; SPTM maps
+    // everything else from the image regions.
+    kc_rw            = &layout->kc.region[APPLE_SPTM_RW];
+    kernel_virt_base = kc_rw->va - (kc_rw->pa - g_phys_base);
+    g_virt_base      = kernel_virt_base;
+
+    sptm_ro               = &layout->sptm.region[APPLE_SPTM_RO];
+    info->sptm_phys_base  = sptm_ro->pa;
+    info->sptm_size       = layout->chain_end - sptm_ro->pa;
+    info->sptm_virt_base  = sptm_ro->va - (sptm_ro->pa - g_phys_base);
+    info->sptm_entry      = apple_sptm_entry_pa(&layout->sptm);
+    info->txm_phys_base   = layout->txm.region[APPLE_SPTM_RO].pa;
+    info->txm_size        = layout->txm.region[APPLE_SPTM_BX].pa + layout->txm.region[APPLE_SPTM_BX].size
+                         - info->txm_phys_base;
+    info->txm_entry       = apple_sptm_entry_pa(&layout->txm);
+    info->kern_entry      = apple_sptm_entry_pa(&layout->kc);
+    info->trustcache_addr = layout->trustcache.pa;
+
+    phys_ptr = layout->end;
+
+    info->sptm_handoff_addr    = phys_ptr;
+    phys_ptr                  += SPTM_HANDOFF_SIZE;
+    info->sptm_boot_args_addr  = phys_ptr;
+    phys_ptr                  += SPTM_BOOT_ARGS_SIZE;
+
+    if (machine->initrd_filename != NULL) {
+        info->ramdisk_addr = phys_ptr;
+        apple_boot_load_ramdisk(machine->initrd_filename, &address_space_memory, info->ramdisk_addr,
+                                &info->ramdisk_size);
+        info->ramdisk_size  = ROUND_UP_16K(info->ramdisk_size);
+        phys_ptr           += info->ramdisk_size;
+    }
+
+    // TZ0 and the SEP firmware: as for other boots (see t8030_load_kernelcache).
+    info->tz0_size  = 240 * MiB;
+    phys_ptr        = ROUND_UP(phys_ptr, 32 * MiB);
+    info->tz0_addr  = phys_ptr;
+    phys_ptr       += info->tz0_size;
+
+    info->sep_fw_addr  = phys_ptr;
+    info->sep_fw_size  = SEPFW_MAPPING_SIZE;
+    phys_ptr          += info->sep_fw_size;
+    if (t8030->sep_fw_filename != NULL) {
+        AppleSEP* sep     = APPLE_SEP(object_property_get_link(OBJECT(t8030), "sep", &error_fatal));
+        gchar*    fw_data = NULL;
+        gsize     sep_fw_size;
+        if (!g_file_get_contents(t8030->sep_fw_filename, &fw_data, &sep_fw_size, NULL)) {
+            error_setg(&error_fatal, "Failed to read SEP Firmware from `%s`", t8030->sep_fw_filename);
+            return;
+        }
+        apple_sep_check_image("SEP firmware", t8030->sep_fw_filename, fw_data, sep_fw_size, SEPFW_MAPPING_SIZE,
+                              &error_fatal);
+        apple_sep_set_fw(sep, info->sep_fw_addr, fw_data, sep_fw_size);
+    }
+
+    info->kern_boot_args_addr  = phys_ptr;
+    info->kern_boot_args_size  = 0x4000;
+    phys_ptr                  += info->kern_boot_args_size;
+
+    // The device tree lives inside the region chain, between the kernel and SPTM.
+    info->device_tree_addr      = layout->device_tree.pa;
+    info->top_of_kernel_data_pa = ROUND_UP_16K(phys_ptr);
+
+    t8030_report_sptm_layout(layout, info);
+
+    t8030_fill_sptm_entropy(t8030);
+    apple_sptm_publish_memory_map(memory_map, layout, g_virt_slide);
+    apple_boot_finalise_dt(t8030->device_tree, &address_space_memory, info);
+    if (!apple_sptm_check_memory_map(memory_map, &err)) {
+        error_prepend(&err, "SPTM boot layout: ");
+        error_propagate(&error_fatal, err);
+        return;
+    }
+
+    mem_size = carveout_alloc_finalise(ca);
+    info_report("Memory Size: 0x" HWADDR_FMT_plx, mem_size);
+
+    apple_boot_setup_bootargs(t8030->build_version, &address_space_memory, info->kern_boot_args_addr,
+                              kernel_virt_base, g_phys_base, mem_size, info->top_of_kernel_data_pa,
+                              ptov_bases(info->device_tree_addr, g_phys_base, kernel_virt_base),
+                              info->device_tree_size, &t8030->video_args, cmdline, machine->ram_size);
+
+    // SPTM gets the kernel's boot arguments expressed in its own virtual
+    // frame (sptm_virt_base maps phys_base), plus the handoff page.
+    apple_boot_setup_sptm_boot_args(t8030->build_version, &address_space_memory, info->sptm_boot_args_addr,
+                                    info->sptm_virt_base, g_phys_base, mem_size, info->top_of_kernel_data_pa,
+                                    ptov_bases(info->device_tree_addr, g_phys_base, info->sptm_virt_base),
+                                    info->device_tree_size, &t8030->video_args, cmdline, machine->ram_size,
+                                    info->sptm_handoff_addr);
+
+    // Same convention as t8030_load_kernelcache(): later users translate
+    // kernel link addresses from the kernelcache base.
+    apple_boot_get_kc_bounds(t8030->kernel, NULL, &kc_base, NULL, NULL, NULL);
+    g_virt_base = kc_base;
+
+    // AMCC read-only region: everything from TXM up to the end of the
+    // kernel's SPTM data (the part of the chain iBoot locks before SPTM).
+    for (int i = 0; i < AMCC_PLANE_COUNT; ++i) {
+        hwaddr ro_end = layout->kc.region[APPLE_SPTM_RS].pa + layout->kc.region[APPLE_SPTM_RS].size;
+        AMCC_WREG32(t8030, AMCC_PLANE_LOWER_LIMIT(i), (layout->chain_start - info->dram_base) >> 14);
+        AMCC_WREG32(t8030, AMCC_PLANE_UPPER_LIMIT(i), (ro_end - info->dram_base - 1) >> 14);
+        AMCC_WREG32(t8030, AMCC_PLANE_LOCK(i), 1);
+        AMCC_WREG32(t8030, AMCC_PLANE_TZ0_BASE(i), (info->tz0_addr - info->dram_base) >> 12);
+        AMCC_WREG32(t8030, AMCC_PLANE_TZ0_END(i), ((info->tz0_addr + info->tz0_size - 1) - info->dram_base) >> 12);
+        AMCC_WREG32(t8030, AMCC_PLANE_TZ0_LOCK(i), 1);
+        AMCC_WREG32(t8030, AMCC_PLANE_BLK_MCC_CHANNEL_DEC(i), 0x2F);
+    }
+
+    if (t8030->sep_rom_filename != NULL || t8030->sep_fw_filename != NULL) {
+        apple_sep_setup_tz0(APPLE_SEP(object_property_get_link(OBJECT(t8030), "sep", &error_fatal)), machine->ram,
+                            info->tz0_addr - info->dram_base, info->tz0_size);
+    }
+}
+
 static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cmdline, CarveoutAllocator* ca)
 {
     MachineState*  machine = MACHINE(t8030);
@@ -444,6 +694,11 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
     hwaddr         phys_ptr;
     hwaddr         kernel_end;
     AppleBootInfo* info = &t8030->boot_info;
+
+    if (t8030->sptm != NULL) {
+        t8030_load_kernelcache_sptm(t8030, cmdline, ca);
+        return;
+    }
 
     apple_boot_get_kc_bounds(t8030->kernel, NULL, &kc_base, &kc_end, &ro_lower, &ro_upper);
 
@@ -470,29 +725,9 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
 
     phys_ptr = vtop_static(ROUND_UP_16K(kc_end + g_virt_slide));
 
-    // Monitor images go right after the kernel, in boot order: SPTM, its
-    // handoff and boot-info pages, then TXM. The ramdisk follows.
-    //
-    // SPTM rounds phys_base up to 32 MiB and shifts virt_base by the same
-    // delta (like XNU's start.s), so its physical address must be congruent
-    // to its link address modulo 32 MiB, the property the kernel slides keep.
+    // SPTM boots use t8030_load_kernelcache_sptm(); a TXM image passed
+    // without SPTM is still mapped after the kernel (it is not entered).
     kernel_end = phys_ptr;
-    if (t8030->sptm != NULL) {
-        vaddr sptm_text;
-        vaddr sptm_end;
-
-        apple_boot_get_kc_bounds(t8030->sptm, &sptm_text, NULL, &sptm_end, NULL, NULL);
-        info->sptm_size      = ROUND_UP_16K(sptm_end - sptm_text);
-        info->sptm_phys_base = t8030_congruent_pa(phys_ptr, sptm_text, L2_GRANULE);
-        info->sptm_virt_base = sptm_text - (info->sptm_phys_base - g_phys_base);
-        info->sptm_entry     = t8030_map_monitor(t8030->sptm, info->sptm_phys_base);
-        phys_ptr             = info->sptm_phys_base + info->sptm_size;
-
-        info->sptm_handoff_addr    = phys_ptr;
-        phys_ptr                  += SPTM_HANDOFF_SIZE;
-        info->sptm_boot_args_addr  = phys_ptr;
-        phys_ptr                  += SPTM_BOOT_ARGS_SIZE;
-    }
 
     // TXM (Trusted Execution Monitor) image. On iOS 27 code-signing / trust-cache
     // / page-execute enforcement lives in TXM, so the boot chain must map it. The
@@ -523,7 +758,7 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
         phys_ptr           += info->ramdisk_size;
     }
 
-    t8030_report_layout(info, vtop_slid(ro_lower), kernel_end, t8030->sptm != NULL, t8030->txm != NULL);
+    t8030_report_layout(info, vtop_slid(ro_lower), kernel_end, false, t8030->txm != NULL);
 
     // TZ0
     // 256 MiB doesn't seem to work properly with sepos 18.5
@@ -584,16 +819,6 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
     apple_boot_setup_bootargs(t8030->build_version, &address_space_memory, info->kern_boot_args_addr, g_virt_base,
                               g_phys_base, mem_size, info->top_of_kernel_data_pa, apple_dt_va, info->device_tree_size,
                               &t8030->video_args, cmdline, machine->ram_size);
-
-    if (t8030->sptm != NULL) {
-        // SPTM gets the kernel's boot arguments expressed in its own virtual
-        // frame (sptm_virt_base maps phys_base), plus the handoff page.
-        apple_boot_setup_sptm_boot_args(t8030->build_version, &address_space_memory, info->sptm_boot_args_addr,
-                                        info->sptm_virt_base, g_phys_base, mem_size, info->top_of_kernel_data_pa,
-                                        ptov_bases(info->device_tree_addr, g_phys_base, info->sptm_virt_base),
-                                        info->device_tree_size, &t8030->video_args, cmdline, machine->ram_size,
-                                        info->sptm_handoff_addr);
-    }
 
     g_virt_base = kc_base;
 
@@ -837,6 +1062,7 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
     assert_nonnull(hdr);
 
     apple_boot_allocate_segment_records(memory_map, hdr);
+    if (t8030->sptm != NULL) { apple_sptm_allocate_memory_map(memory_map, &t8030->sptm_layout); }
 
     apple_boot_populate_dt(t8030->device_tree, info, auto_boot);
 
@@ -2794,6 +3020,12 @@ static void t8030_init(MachineState* machine)
             error_setg(&error_fatal, "Failed to load SPTM");
             return;
         }
+        // SPTM requires the TXM image regions as well (sptm-boot.c).
+        if (t8030->txm == NULL) {
+            error_setg(&error_fatal, "SPTM boots need the TXM image too: pass `txm=<txm.im4p>`");
+            return;
+        }
+        apple_sptm_layout_init(&t8030->sptm_layout, t8030->sptm, t8030->txm, t8030->kernel);
         warn_report("SPTM support is experimental: SPTM runs first, the kernel is not reached yet");
     }
 
