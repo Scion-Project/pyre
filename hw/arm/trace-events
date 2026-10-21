@@ -1,0 +1,6 @@
+# a13.c
+apple_a13_ipi_rr(uint32_t src, uint32_t dst, uint32_t type, int dst_halted, int global) "src %u dst %u type %u dst_halted %d global %d"
+apple_a13_ipi_deliver(uint32_t dst, uint32_t src, uint64_t flag, int dropped) "dst %u src %u flag 0x%" PRIx64 " dropped %d"
+apple_a13_ipi_ack(uint32_t cpu, uint64_t value, uint64_t sr) "cpu %u wrote 0x%" PRIx64 " sr was 0x%" PRIx64
+apple_a13_ipi_tick(uint32_t src, uint32_t dst, uint32_t type) "src %u dst %u type %u"
+apple_a13_ipi_cr(uint64_t ns) "deferred IPI timer %" PRIu64 " ns"

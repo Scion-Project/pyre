@@ -35,6 +35,7 @@
 #include "system/reset.h"
 #include "target/arm/cpregs.h"
 #include "arm-powerctl.h"
+#include "trace.h"
 
 #define A13_CPREG_DEF(p_name, p_op0, p_op1, p_crn, p_crm, p_op2, p_access, p_reset)              \
     {.cp          = CP_REG_ARM64_SYSREG_CP,                                                      \
@@ -77,6 +78,7 @@
 #define IPI_RR_TYPE_DEFERRED  (2 << 28)
 #define IPI_RR_TYPE_NOWAKE    (3 << 28)
 #define IPI_RR_TYPE_MASK      (3 << 28)
+#define IPI_RR_TYPE_SHIFT     (28)
 #define NSEC_PER_USEC         1000ull       /* nanoseconds per microsecond */
 #define USEC_PER_SEC          1000000ull    /* microseconds per second */
 #define NSEC_PER_SEC          1000000000ull /* nanoseconds per second */
@@ -174,6 +176,7 @@ static void apple_a13_cluster_cpreg_write(CPUARMState* env, const ARMCPRegInfo* 
 /* Deliver IPI */
 static void apple_a13_deliver_ipi(AppleA13State* cpu, uint64_t src_cpu, uint64_t flag)
 {
+    trace_apple_a13_ipi_deliver(cpu->cpu_id, src_cpu, flag, cpu->ipi_sr != 0);
     if (cpu->ipi_sr) { return; }
 
     cpu->ipi_sr = 1LL | (src_cpu << IPI_SR_SRC_CPU_SHIFT) | flag;
@@ -223,6 +226,7 @@ static void apple_a13_cluster_tick(AppleA13Cluster* c)
 
         const uint32_t dest = ctz32(candidates);
         const uint32_t type = (noWakeCandidates & BIT32(dest)) ? IPI_RR_TYPE_NOWAKE : IPI_RR_TYPE_DEFERRED;
+        trace_apple_a13_ipi_tick(src, dest, type >> IPI_RR_TYPE_SHIFT);
         apple_a13_cluster_deliver_ipi(c, dest, src, type);
     }
 }
@@ -280,6 +284,7 @@ static void apple_a13_ipi_rr_local(CPUARMState* env, const ARMCPRegInfo* ri, uin
         return;
     }
 
+    trace_apple_a13_ipi_rr(acpu->cpu_id, dst_cpu_id, (value & IPI_RR_TYPE_MASK) >> IPI_RR_TYPE_SHIFT, apple_a13_is_asleep(dst_acpu), 0);
     switch (value & IPI_RR_TYPE_MASK) {
         case IPI_RR_TYPE_NOWAKE:
             if (apple_a13_is_asleep(dst_acpu)) { c->noWakeIPI[acpu->cpu_id] |= BIT32(dst_cpu_id); }
@@ -325,6 +330,7 @@ static void apple_a13_ipi_rr_global(CPUARMState* env, const ARMCPRegInfo* ri, ui
         return;
     }
 
+    trace_apple_a13_ipi_rr(acpu->cpu_id, dst_cpu_id, (value & IPI_RR_TYPE_MASK) >> IPI_RR_TYPE_SHIFT, apple_a13_is_asleep(dst_acpu), 1);
     switch (value & IPI_RR_TYPE_MASK) {
         case IPI_RR_TYPE_NOWAKE:
             if (apple_a13_is_asleep(dst_acpu)) { cluster->noWakeIPI[acpu->cpu_id] |= BIT32(dst_cpu_id); }
@@ -357,6 +363,7 @@ static void apple_a13_ipi_write_sr(CPUARMState* env, const ARMCPRegInfo* ri, uin
     AppleA13Cluster* c       = apple_a13_find_cluster(acpu->cluster_id);
     uint64_t         src_cpu = IPI_SR_SRC_CPU(value);
 
+    trace_apple_a13_ipi_ack(acpu->cpu_id, value, acpu->ipi_sr);
     acpu->ipi_sr = 0;
     qemu_irq_lower(acpu->fast_ipi);
 
@@ -389,6 +396,7 @@ static void apple_a13_ipi_write_cr(CPUARMState* env, const ARMCPRegInfo* ri, uin
         timer_mod_ns(ipicr_timer, ct + nanosec);
     }
     ipi_cr = nanosec;
+    trace_apple_a13_ipi_cr(nanosec);
 }
 
 static const ARMCPRegInfo apple_a13_cp_reginfo_tcg[] = {

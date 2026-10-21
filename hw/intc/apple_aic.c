@@ -392,6 +392,7 @@ static void apple_aic_write(void* opaque, hwaddr addr, uint64_t data, unsigned s
         case REG_AIC_IPI_SET: {
             int i;
 
+            trace_aic_ipi_set(o->cpu_id, val);
             for (i = 0; i < s->numCPU; i++) {
                 if (val & (1 << i)) {
                     set_bit32_atomic(o->cpu_id, &s->cpus[i].pendingIPI);
@@ -408,6 +409,7 @@ static void apple_aic_write(void* opaque, hwaddr addr, uint64_t data, unsigned s
         case REG_AIC_IPI_CLR: {
             int i;
 
+            trace_aic_ipi_clr(o->cpu_id, val);
             for (i = 0; i < s->numCPU; i++) {
                 if (val & (1 << i)) { clear_bit32_atomic(o->cpu_id, &s->cpus[i].pendingIPI); }
             }
@@ -415,14 +417,19 @@ static void apple_aic_write(void* opaque, hwaddr addr, uint64_t data, unsigned s
             if (val & AIC_IPI_SELF) { qatomic_and(&o->pendingIPI, ~AIC_IPI_SELF); }
             break;
         }
-        case REG_AIC_IPI_MASK_SET: qatomic_or(&o->ipi_mask, val & (AIC_IPI_NORMAL | AIC_IPI_SELF)); break;
+        case REG_AIC_IPI_MASK_SET:
+            qatomic_or(&o->ipi_mask, val & (AIC_IPI_NORMAL | AIC_IPI_SELF));
+            trace_aic_ipi_mask(o->cpu_id, 1, val, qatomic_read(&o->ipi_mask));
+            break;
         case REG_AIC_IPI_MASK_CLR:
             qatomic_and(&o->ipi_mask, ~(val & (AIC_IPI_NORMAL | AIC_IPI_SELF)));
+            trace_aic_ipi_mask(o->cpu_id, 0, val, qatomic_read(&o->ipi_mask));
             apple_aic_deliver(s);
             break;
         case REG_AIC_IPI_DEFER_SET: {
             int i;
 
+            trace_aic_ipi_defer_set(o->cpu_id, val);
             for (i = 0; i < s->numCPU; i++) {
                 if (val & (1 << i)) { set_bit32_atomic(o->cpu_id, &s->cpus[i].deferredIPI); }
             }
@@ -528,12 +535,14 @@ static uint64_t apple_aic_read(void* opaque, hwaddr addr, unsigned size)
 
             if (qatomic_read(&o->tmr_isr) & AIC_TMRISR_PCT) {
                 qatomic_and(&o->tmr_isr, ~AIC_TMRISR_PCT);
+                trace_aic_ack(o->cpu_id, kAIC_INT_TMR | kAIC_INT_PVT_TMR);
                 return kAIC_INT_TMR | kAIC_INT_PVT_TMR;
             }
 
             if (qatomic_read(&o->pendingIPI) & AIC_IPI_SELF & ~qatomic_read(&o->ipi_mask)) {
                 qatomic_and(&o->pendingIPI, ~AIC_IPI_SELF);
                 qatomic_or(&o->ipi_mask, AIC_IPI_SELF);
+                trace_aic_ack(o->cpu_id, kAIC_INT_IPI | kAIC_INT_IPI_SELF);
                 return kAIC_INT_IPI | kAIC_INT_IPI_SELF;
             }
 
@@ -541,6 +550,7 @@ static uint64_t apple_aic_read(void* opaque, hwaddr addr, unsigned size)
                 if (qatomic_read(&o->pendingIPI) & ((1 << s->numCPU) - 1)) {
                     qatomic_and(&o->pendingIPI, ~((1 << s->numCPU) - 1));
                     qatomic_or(&o->ipi_mask, AIC_IPI_NORMAL);
+                    trace_aic_ack(o->cpu_id, kAIC_INT_IPI | kAIC_INT_IPI_NORM);
                     return kAIC_INT_IPI | kAIC_INT_IPI_NORM;
                 }
             }
@@ -549,8 +559,10 @@ static uint64_t apple_aic_read(void* opaque, hwaddr addr, unsigned size)
             while ((i = find_next_bit32(s->eir_state, s->numIRQ, i + 1)) < s->numIRQ) {
                 if (!(qatomic_read(&s->eir_dest[i]) & (1 << o->cpu_id))) { continue; }
                 if (test_and_set_bit32_acquire(i, s->eir_mask)) { continue; }
+                trace_aic_ack(o->cpu_id, kAIC_INT_EXT | AIC_INT_EXTID(i));
                 return kAIC_INT_EXT | AIC_INT_EXTID(i);
             }
+            trace_aic_ack(o->cpu_id, kAIC_INT_SPURIOUS);
             return kAIC_INT_SPURIOUS;
         }
         case REG_AIC_IPI_MASK_SET                                  :
