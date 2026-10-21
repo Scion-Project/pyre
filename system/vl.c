@@ -620,7 +620,7 @@ static MachineClass* find_default_machine(GSList* machines)
 static void version(void)
 {
     printf("QEMU emulator version " QEMU_FULL_VERSION "\n" QEMU_COPYRIGHT "\n\n"
-           "ChefKiss Inferno\n"
+           "ios-on-pixel (QEMU-based, not affiliated with or endorsed by ChefKiss)\n"
            "Copyright (c) 2023-2026 Visual Ehrmanntraut and Inferno team\n\n");
 }
 
