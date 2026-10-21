@@ -239,6 +239,57 @@ static bool t8030_kernel_uses_sptm(MachoHeader64* kernel)
            apple_boot_get_segment(kernel, "__TEXT_BOOT_EXEC") != NULL;
 }
 
+// On iOS 27 (SPTM/TXM) the device tree gains a handful of properties that iBoot
+// fills in on a stock boot: a TXM<->kernel secure-channel flag and window, and
+// the secure-boot / cryptex1 certificate-format and key-scheme descriptors. The
+// stock n104ap device tree already carries these, but populating them here makes
+// the emulator the authority on the values iBoot would provide, so a boot does
+// not silently depend on the loaded DT template carrying them. The 26.6.2 vs
+// 27.0.1 n104ap diff (docs/ios27/DEVICETREE-26-27.md) adds no new nodes, only
+// these properties.
+//
+// Gated on SPTM/TXM kernels, so 26 and earlier boots are byte-for-byte
+// unchanged. Every value is the stock one; no security setting is relaxed. In
+// particular the certificate-production-status / certificate-security-mode and
+// effective-*-ap flags are deliberately left untouched at their DT values.
+static void t8030_populate_sptm_dt(AppleT8030MachineState* t8030)
+{
+    AppleDTNode* chosen;
+    AppleDTNode* armio;
+    AppleDTNode* dart_sep;
+
+    chosen = apple_dt_get_node(t8030->device_tree, "chosen");
+    assert_nonnull(chosen);
+
+    // Kernel<->TXM secure channel is present on this boot.
+    apple_dt_set_prop_u32(chosen, "txm-secure-channel", 1);
+    // Image4 trust-evaluation descriptors TXM/AppleImage4 consume.
+    apple_dt_set_prop_str(chosen, "secureboot-certificate-format", "x509");
+    apple_dt_set_prop_str(chosen, "secureboot-key-scheme", "rsa4096");
+    apple_dt_set_prop_str(chosen, "cryptex1-certificate-format", "x509");
+    apple_dt_set_prop_str(chosen, "cryptex1-key-scheme", "rsa4096");
+
+    // The SEP DART carries the TXM secure-channel window. The DART itself is a
+    // page-table-walking IOMMU, so the SEP/kernel driver programs the actual
+    // translation; the model needs no extra mapping, only the window
+    // descriptors here. 16 KiB window at DART IOVA 0x4000, with the matching
+    // reserved VM range (0x4000..0x10000) the driver keeps clear for it.
+    armio = apple_dt_get_node(t8030->device_tree, "arm-io");
+    assert_nonnull(armio);
+    dart_sep = apple_dt_get_node(armio, "dart-sep");
+    if (dart_sep != NULL) {
+        uint64_t vm_reserve[2] = {cpu_to_le64(0x4000), cpu_to_le64(0xc000)};
+
+        apple_dt_set_prop_u64(dart_sep, "txm-secure-channel-base", 0x4000);
+        apple_dt_set_prop_u64(dart_sep, "txm-secure-channel-size", 0x4000);
+        apple_dt_set_prop_u32(dart_sep, "vm-base", 0x4000);
+        apple_dt_set_prop(dart_sep, "vm-reserve", sizeof(vm_reserve), vm_reserve);
+        apple_dt_set_prop_null(dart_sep, "allow-vm-reserve-mapping");
+    }
+
+    info_report("t8030: populated iOS 27 TXM / secure-boot device-tree properties");
+}
+
 // `-M t8030,patch-check=on -kernel <kc>`: apply the kernel patches in memory,
 // report which ones matched, then exit. Needs nothing but the kernel, so new
 // releases can be triaged before the rest of the boot chain supports them.
@@ -2632,6 +2683,10 @@ static void t8030_init(MachineState* machine)
         }
         info_report("TXM: loaded `%s`", t8030->txm_filename);
     }
+
+    // iOS 27+ device-tree properties iBoot fills in (TXM secure channel +
+    // secure-boot descriptors). Gated so pre-27 boots are unchanged.
+    if (t8030_kernel_uses_sptm(t8030->kernel)) { t8030_populate_sptm_dt(t8030); }
 
     if (t8030_kernel_uses_sptm(t8030->kernel)) {
         error_setg(&error_fatal,
