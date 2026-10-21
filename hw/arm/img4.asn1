@@ -8,7 +8,9 @@ IM4P ::= SEQUENCE {
 	description		IA5String,
 	data			OCTET STRING,
 	kbag			OCTET STRING OPTIONAL,
-	trailer			SEQUENCE OF ANY OPTIONAL
+	trailer			SEQUENCE OF ANY OPTIONAL,
+	-- PAYP payload properties (seen on iOS 26 and 27 kernelcaches, not on 14)
+	properties		[0] ANY OPTIONAL
 }
 
 IM4R ::= SEQUENCE {
