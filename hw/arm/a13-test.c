@@ -1,9 +1,10 @@
 /*
  * Apple A13 CPU test bench ("a13-test" machine).
  *
- * One AppleA13 core (the same CPU type the t8030 machine creates, so it has
- * the full A13 + GXF/SPTM system-register set), RAM, and a test-control
- * register block. No SoC devices, no device tree and no firmware of any kind.
+ * One AppleA13 core in an A13 cluster (the same CPU and cluster types the
+ * t8030 machine creates, so it has the full A13 + GXF/SPTM system-register
+ * set, per-cluster registers included), RAM, and a test-control register
+ * block. No SoC devices, no device tree and no firmware of any kind.
  *
  * It exists so bare-metal CPU-model tests (hw/arm/tests/) can run on a plain
  * host build and report a result through QEMU's exit status:
@@ -64,11 +65,12 @@ struct A13TestMachineState
 {
     MachineState parent_obj;
 
-    AppleA13State* cpu;
-    MemoryRegion   ctl;
-    gchar*         image;
-    gsize          image_size;
-    uint64_t       detail;
+    AppleA13Cluster cluster;
+    AppleA13State*  cpu;
+    MemoryRegion    ctl;
+    gchar*          image;
+    gsize           image_size;
+    uint64_t        detail;
 };
 
 static uint64_t a13_test_ctl_read(void* opaque, hwaddr addr, unsigned size)
@@ -129,9 +131,14 @@ static void a13_test_init(MachineState* machine)
     memory_region_init_io(&s->ctl, OBJECT(machine), &a13_test_ctl_ops, s, "a13-test.ctl", A13_TEST_CTL_SIZE);
     memory_region_add_subregion(get_system_memory(), A13_TEST_CTL_BASE, &s->ctl);
 
+    /* Same arrangement as t8030: the core sits in an A13 cluster, which backs
+     * the per-cluster registers (CTRR, IPI). */
+    object_initialize_child(OBJECT(machine), "cluster0", &s->cluster, TYPE_APPLE_A13_CLUSTER);
+    qdev_prop_set_uint32(DEVICE(&s->cluster), "cluster-id", 0);
     s->cpu = apple_a13_create("cpu0", 0, 0, 0, 'P');
-    object_property_add_child(OBJECT(machine), "cpu0", OBJECT(s->cpu));
+    object_property_add_child(OBJECT(&s->cluster), "cpu0", OBJECT(s->cpu));
     qdev_realize(DEVICE(s->cpu), NULL, &error_fatal);
+    qdev_realize(DEVICE(&s->cluster), NULL, &error_fatal);
 }
 
 static void a13_test_reset(MachineState* machine, ResetType type)

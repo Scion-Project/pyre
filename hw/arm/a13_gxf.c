@@ -669,7 +669,8 @@ void apple_a13_init_gxf_override(AppleA13State* cpu)
  * - in the A13 core table, defined just before this:
  *   S3_6_C15_C2_0 ARM64_REG_MMU_ERR_STS, S3_4_C15_C0_2 ARM64_REG_FED_ERR_STS,
  *   S3_4_C15_C0_5, S3_4_C15_C1_3 AMX_STATUS_EL1 (read-only),
- *   S3_4_C15_C1_4 AMX_CTL_EL1;
+ *   S3_4_C15_C1_4 AMX_CTL_EL1, and the per-cluster CTRR registers
+ *   S3_4_C15_C2_2..C2_5 (CTRR_LOCK, CTRR_A_LWR, CTRR_A_UPR, CTRR_CTL);
  * - in target/arm/helper.c, defined later during the ARM CPU realize:
  *   S3_4_C15_C0_4 APCTL_EL1, S3_4_C15_C1_0/C1_1 KERNELKEYLO/HI_EL1,
  *   S3_4_C15_C1_2 VMSA_LOCK_EL1.

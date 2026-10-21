@@ -10,7 +10,7 @@
  *      model does not define - fails the test closed;
  *   2. at EL1, MSR/MRS round-trips every placeholder register added for
  *      SPTM, and checks that the encodings SPTM uses which already have a
- *      real model (PAC keys, APCTL, VMSA lock, AMX, error status) are
+ *      real model (PAC keys, APCTL, VMSA lock, AMX, CTRR, error status) are
  *      accessible, writing back the value read so their state is unchanged;
  *   3. reproduces SPTM's bootstrap prologue in miniature: GXF_CONFIG_EL1 = 1,
  *      GXF_ENTER_EL1 = handler, GENTER; checks GXF_STATUS_EL1 says guarded,
@@ -91,10 +91,6 @@ _start:
     CHECK_RW 4, 15, 0, 0, 0xa5a5a5a5a5a5a5a5
     CHECK_RW 4, 15, 0, 1, 0x5a5a5a5a5a5a5a5a
     CHECK_RW 4, 15, 0, 3, 0xffffffff00000000
-    CHECK_RW 4, 15, 2, 2, 0xaaaaaaaabbbbbbbb
-    CHECK_RW 4, 15, 2, 3, 0xccccccccdddddddd
-    CHECK_RW 4, 15, 2, 4, 0xeeeeeeeeffffffff
-    CHECK_RW 4, 15, 2, 5, 0x0123deadbeef4567
     /* already modelled elsewhere: must be accessible, state left as is */
     CHECK_WB 6, 15, 2, 0                       /* ARM64_REG_MMU_ERR_STS */
     CHECK_WB 4, 15, 0, 2                       /* ARM64_REG_FED_ERR_STS */
@@ -105,6 +101,10 @@ _start:
     CHECK_WB 4, 15, 1, 2                       /* VMSA_LOCK_EL1 */
     CHECK_RD 4, 15, 1, 3                       /* AMX_STATUS_EL1 (read-only) */
     CHECK_WB 4, 15, 1, 4                       /* AMX_CTL_EL1 */
+    CHECK_WB 4, 15, 2, 2                       /* CTRR_LOCK_EL1 (per cluster) */
+    CHECK_WB 4, 15, 2, 3                       /* CTRR_A_LWR_EL1 (per cluster) */
+    CHECK_WB 4, 15, 2, 4                       /* CTRR_A_UPR_EL1 (per cluster) */
+    CHECK_WB 4, 15, 2, 5                       /* CTRR_CTL_EL1 (per cluster) */
 
 #ifdef NEGATIVE_CONTROL
     CHECK_RW 6, 15, 14, 7, 0x1                 /* undefined: must UNDEF */
