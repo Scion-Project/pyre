@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 env:
-  IOS_ON_PIXEL_REF: ${{ inputs.ios_on_pixel_ref || 'main' }}
+  IOS_ON_PIXEL_REF: ${{ inputs.ios_on_pixel_ref || '0fc752f13a51dbc851290a41124152952961ea3f' }} # TEMP: verification only, reverted to main
   ANDROID_NDK_VERSION: "28.2.13676358"
 
 jobs:
