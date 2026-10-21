@@ -30,6 +30,14 @@
 #include "qemu/timer.h"
 #include "ui/console.h"
 #include "ui/input.h"
+#include "trace.h"
+
+/*
+ * Paths per frame. A frame is 9 (HID report header) + 27 (frame header)
+ * + 30 per path + 2 (CRC) bytes and must fit an LL packet (0x204 bytes,
+ * minus 4 preamble, 8 LL header and 2 CRC), so up to 15 paths fit.
+ */
+#define MT_MAX_PATHS (15)
 
 typedef struct AppleMTSPIBuffer
 {
@@ -38,6 +46,39 @@ typedef struct AppleMTSPIBuffer
     uint32_t len;
     uint32_t read_pos;
 } AppleMTSPIBuffer;
+
+/*
+ * One contact fed through QEMU's multitouch input events (INPUT_EVENT_KIND_MTT,
+ * e.g. QMP input-send-event). Indexed by path ID - 1; slots map onto these.
+ */
+typedef struct AppleMTSPIContact
+{
+    bool     active;    // reported or about to be; path ID in use
+    bool     down;      // finger on the glass
+    bool     began;     // MAKE_TOUCH not reported yet
+    bool     ended;     // BREAK_TOUCH not reported yet
+    bool     moved;     // position changed since the last frame
+    int32_t  tracking_id;
+    int16_t  x;
+    int16_t  y;
+    int16_t  sent_x;
+    int16_t  sent_y;
+    uint64_t sent_ts;
+    uint16_t path_flags;
+} AppleMTSPIContact;
+
+/* Report fields of one path (finger) record in a touch frame. */
+typedef struct AppleMTSPIPath
+{
+    uint8_t  path_id;
+    uint8_t  stage;
+    uint8_t  finger_id;
+    int16_t  x;
+    int16_t  y;
+    uint16_t vel_x;
+    uint16_t vel_y;
+    uint16_t flags;
+} AppleMTSPIPath;
 
 typedef struct AppleMTSPILLPacket
 {
@@ -73,6 +114,14 @@ struct AppleMTSPIState
     int32_t    prev_btn_state;
     uint32_t   display_width;
     uint32_t   display_height;
+
+    /* Multitouch (INPUT_EVENT_KIND_MTT) contacts; independent of the pointer above. */
+    QemuInputHandlerState* mtt_handler;
+    QEMUTimer*             mtt_timer;
+    QEMUTimer*             mtt_end_timer;
+    bool                   mtt_touch_pending;
+    int8_t                 mtt_slot_contact[INPUT_EVENT_SLOTS_MAX];
+    AppleMTSPIContact      mtt_contacts[MT_MAX_PATHS];
 };
 
 // HBPP Command:
@@ -551,6 +600,7 @@ static void apple_mt_spi_handle_control(AppleMTSPIState* s)
 }
 
 static void apple_mt_spi_send_path_update(AppleMTSPIState* s, uint8_t path_stage);
+static void apple_mt_spi_mtt_send_frame(AppleMTSPIState* s, uint8_t lift_stage);
 
 static void apple_mt_spi_handle_fw_packet(AppleMTSPIState* s)
 {
@@ -562,6 +612,9 @@ static void apple_mt_spi_handle_fw_packet(AppleMTSPIState* s)
         apple_mt_spi_buf_set_capacity(&s->rx, LL_PACKET_LEN);
 
         if (s->touch_pending && QTAILQ_EMPTY(&s->pending_fw)) { apple_mt_spi_send_path_update(s, PATH_STAGE_TOUCHING); }
+        if (s->mtt_touch_pending && QTAILQ_EMPTY(&s->pending_fw)) {
+            apple_mt_spi_mtt_send_frame(s, PATH_STAGE_LINGER_IN_RANGE);
+        }
 
         if (QTAILQ_EMPTY(&s->pending_fw)) { apple_mt_spi_push_no_data(&buf); }
         else {
@@ -636,7 +689,9 @@ static uint32_t apple_mt_spi_transfer(SSIPeripheral* dev, uint32_t val)
 
     ret = apple_mt_spi_buf_pop(&s->tx);
 
-    if (apple_mt_spi_buf_is_empty(&s->pending_hbpp) && QTAILQ_EMPTY(&s->pending_fw) && !s->touch_pending) {
+    if (apple_mt_spi_buf_is_empty(&s->pending_hbpp) && QTAILQ_EMPTY(&s->pending_fw) && !s->touch_pending
+        && !s->mtt_touch_pending)
+    {
         qemu_irq_raise(s->irq);
     }
     else {
@@ -681,67 +736,49 @@ static uint16_t apple_mt_spi_contact_density(int32_t mult, int32_t major, int32_
     return (uint16_t)(((int64_t)mult * 400) / sqr);
 }
 
-static void apple_mt_spi_send_path_update(AppleMTSPIState* s, uint8_t path_stage)
+/*
+ * Velocity of a path since it was last reported, and remember this report.
+ * The first report after a reset compares against (0, 0) at time 0, so it
+ * comes out as (almost) zero.
+ */
+static void apple_mt_spi_path_velocity(int16_t x, int16_t y, uint64_t ts, int16_t* sent_x, int16_t* sent_y,
+                                       uint64_t* sent_ts, uint16_t* vel_x, uint16_t* vel_y)
 {
-    AppleMTSPILLPacket* packet;
-    int16_t             x  = s->cur_x;
-    int16_t             y  = s->cur_y;
-    uint64_t            ts = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    uint64_t            ts_delta;
-    int32_t             x_delta;
-    int32_t             y_delta;
+    uint64_t ts_delta;
+    int32_t  x_delta;
+    int32_t  y_delta;
 
-    if (path_stage == PATH_STAGE_TOUCHING) { s->touch_pending = false; }
-
-    ts_delta = (ts - s->sent_ts) / SCALE_MS;
+    ts_delta = (ts - *sent_ts) / SCALE_MS;
     ts_delta = MAX(ts_delta, 1);    // Prevent div-by-zero
 
-    x_delta = x - s->sent_x;
-    y_delta = y - s->sent_y;
+    x_delta = x - *sent_x;
+    y_delta = y - *sent_y;
 
-    s->sent_ts = ts;
-    s->sent_x  = x;
-    s->sent_y  = y;
+    *sent_ts = ts;
+    *sent_x  = x;
+    *sent_y  = y;
 
-    packet       = g_new0(AppleMTSPILLPacket, 1);
-    packet->type = LL_PACKET_LOSSLESS_OUTPUT;
-    apple_mt_spi_buf_ensure_capacity(&packet->buf, 9 + 27 + 30 + 2);
-    apple_mt_spi_push_report_hdr(&packet->buf, HID_TRANSFER_PACKET_OUTPUT, HID_REPORT_BINARY_PATH_OR_IMAGE,
-                                 HID_PACKET_STATUS_SUCCESS, s->frame, 27 + 30);
-    apple_mt_spi_buf_push_byte(&packet->buf, s->frame);
-    apple_mt_spi_buf_push_byte(&packet->buf, 28);    // Header Len
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
-    apple_mt_spi_buf_push_dword(&packet->buf, ts / SCALE_MS);
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
-    apple_mt_spi_buf_push_word(&packet->buf, 0);
-    apple_mt_spi_buf_push_word(&packet->buf, 0);     // Image Len
-    apple_mt_spi_buf_push_byte(&packet->buf, 1);     // Path Count
-    apple_mt_spi_buf_push_byte(&packet->buf, 30);    // Path Len
-    apple_mt_spi_buf_push_word(&packet->buf, 0);
-    apple_mt_spi_buf_push_word(&packet->buf, 0);
-    apple_mt_spi_buf_push_word(&packet->buf, 0);
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
-    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    *vel_x = ABS(x_delta) * 1000 / ts_delta;
+    *vel_y = ABS(y_delta) * 1000 / ts_delta;
+}
 
-    // Path 0
-    apple_mt_spi_buf_push_byte(&packet->buf, 1);    // Path ID
-    apple_mt_spi_buf_push_byte(&packet->buf, path_stage);
-    apple_mt_spi_buf_push_byte(&packet->buf, 1);    // Finger ID
-    apple_mt_spi_buf_push_byte(&packet->buf, 1);    // Hand ID
-    apple_mt_spi_buf_push_word(&packet->buf, x);
-    apple_mt_spi_buf_push_word(&packet->buf, y);
-    apple_mt_spi_buf_push_word(&packet->buf, ABS(x_delta) * 1000 / ts_delta);
-    apple_mt_spi_buf_push_word(&packet->buf, ABS(y_delta) * 1000 / ts_delta);
-    int32_t rad_mult  = 100;
-    int32_t rad_major = 660;
-    int32_t rad_minor = 580;
-    apple_mt_spi_buf_push_word(&packet->buf, rad_major);
-    apple_mt_spi_buf_push_word(&packet->buf, rad_minor);
+static void apple_mt_spi_push_path(AppleMTSPIBuffer* buf, const AppleMTSPIPath* path)
+{
+    int32_t  rad_mult  = 100;
+    int32_t  rad_major = 660;
+    int32_t  rad_minor = 580;
+    uint16_t contact_density;
+
+    apple_mt_spi_buf_push_byte(buf, path->path_id);
+    apple_mt_spi_buf_push_byte(buf, path->stage);
+    apple_mt_spi_buf_push_byte(buf, path->finger_id);
+    apple_mt_spi_buf_push_byte(buf, 1);    // Hand ID
+    apple_mt_spi_buf_push_word(buf, path->x);
+    apple_mt_spi_buf_push_word(buf, path->y);
+    apple_mt_spi_buf_push_word(buf, path->vel_x);
+    apple_mt_spi_buf_push_word(buf, path->vel_y);
+    apple_mt_spi_buf_push_word(buf, rad_major);
+    apple_mt_spi_buf_push_word(buf, rad_minor);
     // no freaking idea if this is even remotely correct.
     // int angle = 0;
     // double deltaX = s->x - s->prev_x;
@@ -752,15 +789,58 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState* s, uint8_t path_stage
     // angle = lround(deg);
     // angle = 19317;
     // angle = 90;
-    apple_mt_spi_buf_push_word(&packet->buf, 19317);    // orientation
-    apple_mt_spi_buf_push_word(&packet->buf,
+    apple_mt_spi_buf_push_word(buf, 19317);    // orientation
+    apple_mt_spi_buf_push_word(buf,
                                100);    // rad mult
-    uint16_t contact_density = apple_mt_spi_contact_density(rad_mult, rad_major, rad_minor);
-    apple_mt_spi_buf_push_word(&packet->buf, contact_density);
-    apple_mt_spi_buf_push_word(&packet->buf, contact_density);
-    apple_mt_spi_buf_push_word(&packet->buf, 0);    // pitch
-    apple_mt_spi_buf_push_word(&packet->buf, 0);    // force
-    apple_mt_spi_buf_push_word(&packet->buf, s->path_flags);
+    contact_density = apple_mt_spi_contact_density(rad_mult, rad_major, rad_minor);
+    apple_mt_spi_buf_push_word(buf, contact_density);
+    apple_mt_spi_buf_push_word(buf, contact_density);
+    apple_mt_spi_buf_push_word(buf, 0);    // pitch
+    apple_mt_spi_buf_push_word(buf, 0);    // force
+    apple_mt_spi_buf_push_word(buf, path->flags);
+}
+
+/* Queues one touch frame (HID report 0x44) carrying @count paths. */
+static void apple_mt_spi_queue_frame(AppleMTSPIState* s, uint64_t ts, const AppleMTSPIPath* paths, uint8_t count)
+{
+    AppleMTSPILLPacket* packet;
+    uint8_t             i;
+
+    assert_cmpuint(count, >=, 1);
+    assert_cmpuint(count, <=, MT_MAX_PATHS);
+
+    trace_apple_mt_spi_frame(s->frame, count);
+    for (i = 0; i < count; i++) {
+        trace_apple_mt_spi_frame_path(s->frame, paths[i].path_id, paths[i].stage, paths[i].finger_id, paths[i].x,
+                                      paths[i].y, paths[i].flags);
+    }
+
+    packet       = g_new0(AppleMTSPILLPacket, 1);
+    packet->type = LL_PACKET_LOSSLESS_OUTPUT;
+    apple_mt_spi_buf_ensure_capacity(&packet->buf, 9 + 27 + 30 * count + 2);
+    apple_mt_spi_push_report_hdr(&packet->buf, HID_TRANSFER_PACKET_OUTPUT, HID_REPORT_BINARY_PATH_OR_IMAGE,
+                                 HID_PACKET_STATUS_SUCCESS, s->frame, 27 + 30 * count);
+    apple_mt_spi_buf_push_byte(&packet->buf, s->frame);
+    apple_mt_spi_buf_push_byte(&packet->buf, 28);    // Header Len
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    apple_mt_spi_buf_push_dword(&packet->buf, ts / SCALE_MS);
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    apple_mt_spi_buf_push_word(&packet->buf, 0);
+    apple_mt_spi_buf_push_word(&packet->buf, 0);        // Image Len
+    apple_mt_spi_buf_push_byte(&packet->buf, count);    // Path Count
+    apple_mt_spi_buf_push_byte(&packet->buf, 30);       // Path Len
+    apple_mt_spi_buf_push_word(&packet->buf, 0);
+    apple_mt_spi_buf_push_word(&packet->buf, 0);
+    apple_mt_spi_buf_push_word(&packet->buf, 0);
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+    apple_mt_spi_buf_push_byte(&packet->buf, 0);
+
+    for (i = 0; i < count; i++) { apple_mt_spi_push_path(&packet->buf, &paths[i]); }
 
     apple_mt_spi_buf_push_crc16(&packet->buf);
 
@@ -771,6 +851,26 @@ static void apple_mt_spi_send_path_update(AppleMTSPIState* s, uint8_t path_stage
 
     QTAILQ_INSERT_TAIL(&s->pending_fw, packet, next);
     qemu_irq_lower(s->irq);
+}
+
+/* The legacy absolute-pointer finger: always path 1, finger 1. */
+static void apple_mt_spi_send_path_update(AppleMTSPIState* s, uint8_t path_stage)
+{
+    AppleMTSPIPath path = {
+        .path_id   = 1,
+        .stage     = path_stage,
+        .finger_id = 1,
+        .x         = s->cur_x,
+        .y         = s->cur_y,
+        .flags     = s->path_flags,
+    };
+    uint64_t ts = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (path_stage == PATH_STAGE_TOUCHING) { s->touch_pending = false; }
+
+    apple_mt_spi_path_velocity(path.x, path.y, ts, &s->sent_x, &s->sent_y, &s->sent_ts, &path.vel_x, &path.vel_y);
+
+    apple_mt_spi_queue_frame(s, ts, &path, 1);
 }
 
 static void apple_mt_spi_schedule_touch_update(AppleMTSPIState* s, uint8_t path_stage, int16_t x, int16_t y)
@@ -819,15 +919,16 @@ static void apple_mt_spi_end_timer_tick(void* opaque)
     s->path_flags = 0;
 }
 
-static void apple_mt_spi_mouse_event(void* opaque, int dx, int dy, int dz, int buttons_state)
+/* QEMU absolute axis value (INPUT_EVENT_ABS_MIN..MAX) to sensor surface units. */
+static int16_t apple_mt_spi_scale_x(int value)
+{ return qemu_input_scale_axis(value, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, MT_SENSOR_SURFACE_WIDTH); }
+
+static int16_t apple_mt_spi_scale_y(AppleMTSPIState* s, int value)
 {
-    AppleMTSPIState* s = opaque;
-    int16_t          x, y;
+    int16_t y;
 
-    QEMU_LOCK_GUARD(&s->lock);
-
-    x = qemu_input_scale_axis(dx, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, MT_SENSOR_SURFACE_WIDTH);
-    y = qemu_input_scale_axis(INPUT_EVENT_ABS_MAX - dy, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0,
+    // The sensor's y axis points up.
+    y = qemu_input_scale_axis(INPUT_EVENT_ABS_MAX - value, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0,
                               MT_SENSOR_SURFACE_HEIGHT);
 
     // Hardcoded calibration on y-axis.
@@ -835,7 +936,18 @@ static void apple_mt_spi_mouse_event(void* opaque, int dx, int dy, int dz, int b
     // it might not be perfect, also there might be some calibration needed for
     // "x".
     y -= qemu_input_scale_axis(16, 0, s->display_height, 0, MT_SENSOR_SURFACE_HEIGHT);
-    y  = MAX(y, 0);
+    return MAX(y, 0);
+}
+
+static void apple_mt_spi_mouse_event(void* opaque, int dx, int dy, int dz, int buttons_state)
+{
+    AppleMTSPIState* s = opaque;
+    int16_t          x, y;
+
+    QEMU_LOCK_GUARD(&s->lock);
+
+    x = apple_mt_spi_scale_x(dx);
+    y = apple_mt_spi_scale_y(s, dy);
 
     s->prev_btn_state = s->btn_state;
     s->btn_state      = buttons_state;
@@ -861,6 +973,239 @@ static void apple_mt_spi_mouse_event(void* opaque, int dx, int dy, int dz, int b
         return;
     }
 }
+
+/*
+ * Multitouch input (INPUT_EVENT_KIND_MTT).
+ *
+ * Each slot that begins a contact gets the lowest free path ID, so a quick
+ * re-touch on a slot whose previous contact is still lingering gets a new
+ * path. Events are collected until the input sync; then one frame reports
+ * every contact: MAKE_TOUCH for new ones, BREAK_TOUCH for lifted ones and
+ * TOUCHING for the rest. Like the pointer path, pure movement is coalesced
+ * into the next frame the host polls for, the frame repeats at 60 Hz while
+ * a finger is down, and 1/60 s after a lift the lifted paths are reported
+ * as LINGER_IN_RANGE and then OUT_OF_RANGE.
+ */
+
+static void apple_mt_spi_mtt_send_frame(AppleMTSPIState* s, uint8_t lift_stage)
+{
+    AppleMTSPIPath     paths[MT_MAX_PATHS];
+    AppleMTSPIContact* c;
+    uint64_t           ts    = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint8_t            count = 0;
+    int                i;
+
+    s->mtt_touch_pending = false;
+
+    for (i = 0; i < MT_MAX_PATHS; i++) {
+        c = &s->mtt_contacts[i];
+        if (!c->active) { continue; }
+
+        AppleMTSPIPath* path = &paths[count++];
+
+        path->path_id   = i + 1;
+        path->finger_id = (i % 5) + 1;
+        if (c->began) {
+            path->stage   = PATH_STAGE_MAKE_TOUCH;
+            c->path_flags = apple_mt_spi_contact_is_from_edge(c->x, c->y) ? PATH_FLAGS_EDGE : 0;
+        }
+        else if (c->down) {
+            path->stage = PATH_STAGE_TOUCHING;
+        }
+        else if (c->ended) {
+            path->stage = PATH_STAGE_BREAK_TOUCH;
+        }
+        else {
+            path->stage = lift_stage;
+        }
+        path->x     = c->x;
+        path->y     = c->y;
+        path->flags = c->path_flags;
+        apple_mt_spi_path_velocity(c->x, c->y, ts, &c->sent_x, &c->sent_y, &c->sent_ts, &path->vel_x, &path->vel_y);
+
+        // A contact that began and ended within one sync breaks in the next frame.
+        if (path->stage == PATH_STAGE_MAKE_TOUCH) { c->began = false; }
+        if (path->stage == PATH_STAGE_BREAK_TOUCH) { c->ended = false; }
+        c->moved = false;
+        if (path->stage == PATH_STAGE_OUT_OF_RANGE) { *c = (AppleMTSPIContact){0}; }
+    }
+
+    if (count) { apple_mt_spi_queue_frame(s, ts, paths, count); }
+}
+
+static bool apple_mt_spi_mtt_any(AppleMTSPIState* s, bool down, bool lifted)
+{
+    int i;
+
+    for (i = 0; i < MT_MAX_PATHS; i++) {
+        const AppleMTSPIContact* c = &s->mtt_contacts[i];
+
+        if (!c->active) { continue; }
+        if (down && c->down) { return true; }
+        if (lifted && !c->down) { return true; }
+    }
+    return false;
+}
+
+static void apple_mt_spi_mtt_timer_tick(void* opaque)
+{
+    AppleMTSPIState* s = opaque;
+
+    QEMU_LOCK_GUARD(&s->lock);
+
+    if (!apple_mt_spi_mtt_any(s, true, false)) { return; }
+
+    s->mtt_touch_pending = true;
+    qemu_irq_lower(s->irq);
+
+    timer_mod(s->mtt_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND / 60);
+}
+
+static void apple_mt_spi_mtt_end_timer_tick(void* opaque)
+{
+    AppleMTSPIState* s = opaque;
+
+    QEMU_LOCK_GUARD(&s->lock);
+
+    if (!apple_mt_spi_mtt_any(s, false, true)) { return; }
+
+    apple_mt_spi_mtt_send_frame(s, PATH_STAGE_LINGER_IN_RANGE);
+    apple_mt_spi_mtt_send_frame(s, PATH_STAGE_OUT_OF_RANGE);
+}
+
+static int apple_mt_spi_mtt_alloc_path(AppleMTSPIState* s)
+{
+    int i;
+
+    for (i = 0; i < MT_MAX_PATHS; i++) {
+        if (!s->mtt_contacts[i].active) { return i; }
+    }
+    return -1;
+}
+
+static void apple_mt_spi_mtt_event(DeviceState* dev, QemuConsole* src, InputEvent* evt)
+{
+    AppleMTSPIState*      s   = APPLE_MT_SPI(dev);
+    InputMultiTouchEvent* mtt = evt->u.mtt.data;
+    AppleMTSPIContact*    c;
+    int                   idx;
+
+    QEMU_LOCK_GUARD(&s->lock);
+
+    trace_apple_mt_spi_mtt_event(InputMultiTouchType_str(mtt->type), mtt->slot, mtt->tracking_id,
+                                 InputAxis_str(mtt->axis), mtt->value);
+
+    if (mtt->slot < INPUT_EVENT_SLOTS_MIN || mtt->slot >= INPUT_EVENT_SLOTS_MAX) {
+        warn_report("%s: multitouch slot %" PRId64 " out of range", __func__, mtt->slot);
+        return;
+    }
+
+    idx = s->mtt_slot_contact[mtt->slot];
+
+    if (mtt->type == INPUT_MULTI_TOUCH_TYPE_BEGIN) {
+        if (idx >= 0) {
+            // A begin on a held slot: lift the old contact first.
+            s->mtt_contacts[idx].down  = false;
+            s->mtt_contacts[idx].ended = true;
+        }
+        idx                            = apple_mt_spi_mtt_alloc_path(s);
+        s->mtt_slot_contact[mtt->slot] = idx;
+        if (idx < 0) {
+            warn_report("%s: too many multitouch contacts", __func__);
+            return;
+        }
+        c              = &s->mtt_contacts[idx];
+        *c             = (AppleMTSPIContact){0};
+        c->active      = true;
+        c->down        = true;
+        c->began       = true;
+        c->tracking_id = mtt->tracking_id;
+        return;
+    }
+
+    if (idx < 0) { return; }    // No contact on this slot (begin missing or dropped).
+
+    c = &s->mtt_contacts[idx];
+
+    switch (mtt->type) {
+        case INPUT_MULTI_TOUCH_TYPE_DATA:
+            if (mtt->axis == INPUT_AXIS_X) { c->x = apple_mt_spi_scale_x(mtt->value); }
+            else if (mtt->axis == INPUT_AXIS_Y) {
+                c->y = apple_mt_spi_scale_y(s, mtt->value);
+            }
+            c->moved = true;
+            break;
+        case INPUT_MULTI_TOUCH_TYPE_END:
+        case INPUT_MULTI_TOUCH_TYPE_CANCEL:
+            c->down                        = false;
+            c->ended                       = true;
+            s->mtt_slot_contact[mtt->slot] = -1;
+            break;
+        default: break;
+    }
+}
+
+static bool apple_mt_spi_mtt_transition_pending(AppleMTSPIState* s)
+{
+    int i;
+
+    for (i = 0; i < MT_MAX_PATHS; i++) {
+        const AppleMTSPIContact* c = &s->mtt_contacts[i];
+
+        if (c->active && (c->began || c->ended)) { return true; }
+    }
+    return false;
+}
+
+static void apple_mt_spi_mtt_sync(DeviceState* dev)
+{
+    AppleMTSPIState* s     = APPLE_MT_SPI(dev);
+    bool             moved = false;
+    int              i;
+
+    QEMU_LOCK_GUARD(&s->lock);
+
+    for (i = 0; i < MT_MAX_PATHS; i++) { moved |= s->mtt_contacts[i].active && s->mtt_contacts[i].moved; }
+
+    if (apple_mt_spi_mtt_transition_pending(s)) {
+        // At most two frames: a tap within one sync makes, then breaks.
+        do {
+            apple_mt_spi_mtt_send_frame(s, PATH_STAGE_LINGER_IN_RANGE);
+        }
+        while (apple_mt_spi_mtt_transition_pending(s));
+        if (apple_mt_spi_mtt_any(s, false, true)) {
+            timer_mod(s->mtt_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND / 60);
+        }
+    }
+    else if (moved) {
+        s->mtt_touch_pending = true;
+        qemu_irq_lower(s->irq);
+    }
+
+    if (apple_mt_spi_mtt_any(s, true, false)) {
+        timer_mod(s->mtt_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND / 60);
+    }
+    else {
+        timer_del(s->mtt_timer);
+    }
+}
+
+static const QemuInputHandler apple_mt_spi_mtt_handler = {
+    .name  = "Apple Multitouch HID SPI (multitouch)",
+    .mask  = INPUT_EVENT_MASK_MTT,
+    .event = apple_mt_spi_mtt_event,
+    .sync  = apple_mt_spi_mtt_sync,
+};
+
+static void apple_mt_spi_mtt_reset(AppleMTSPIState* s)
+{
+    timer_del(s->mtt_timer);
+    timer_del(s->mtt_end_timer);
+    s->mtt_touch_pending = false;
+    memset(s->mtt_slot_contact, -1, sizeof(s->mtt_slot_contact));
+    memset(s->mtt_contacts, 0, sizeof(s->mtt_contacts));
+}
+
 static void apple_mt_spi_realize(SSIPeripheral* dev, Error** errp)
 {
     AppleMTSPIState*   s;
@@ -870,6 +1215,9 @@ static void apple_mt_spi_realize(SSIPeripheral* dev, Error** errp)
 
     entry = qemu_add_mouse_event_handler(apple_mt_spi_mouse_event, s, 1, "Apple Multitouch HID SPI");
     qemu_activate_mouse_event_handler(entry);
+
+    s->mtt_handler = qemu_input_handler_register(DEVICE(s), &apple_mt_spi_mtt_handler);
+    qemu_input_handler_activate(s->mtt_handler);
 }
 
 static const Property apple_mt_spi_props[] = {
@@ -899,6 +1247,8 @@ static void apple_mt_spi_reset_enter(Object* obj, ResetType type)
     s->sent_ts        = 0;
     s->touch_pending  = false;
     s->frame          = 0;
+
+    apple_mt_spi_mtt_reset(s);
 
     apple_mt_spi_buf_free(&s->tx);
     apple_mt_spi_buf_free(&s->rx);
@@ -948,6 +1298,10 @@ static void apple_mt_spi_init(Object* obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->irq, APPLE_MT_SPI_IRQ, 1);
     s->timer     = timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_mt_spi_timer_tick, s);
     s->end_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_mt_spi_end_timer_tick, s);
+
+    s->mtt_timer     = timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_mt_spi_mtt_timer_tick, s);
+    s->mtt_end_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_mt_spi_mtt_end_timer_tick, s);
+    memset(s->mtt_slot_contact, -1, sizeof(s->mtt_slot_contact));
 
     QTAILQ_INIT(&s->pending_fw);
 
