@@ -24,6 +24,7 @@
 #include "exec/hwaddr.h"
 #include "hw/arm/a13.h"
 #include "hw/arm/boot.h"
+#include "hw/arm/sptm-boot.h"
 #include "hw/boards.h"
 #include "hw/sysbus.h"
 #include "qapi/qapi-types-usb.h"
@@ -53,6 +54,7 @@ typedef struct
     AppleDTNode*    device_tree;
     uint8_t*        trustcache;
     MachoHeader64*  txm;
+    AppleSptmLayout sptm_layout;
     char*           txm_filename;
     char*           securerom;
     gsize           securerom_size;

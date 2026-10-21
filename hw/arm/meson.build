@@ -17,6 +17,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: [liblzfse, files(
     'kernel_patches.c',
     'lm-backlight.c',
     's8000.c',
+    'sptm-boot.c',
     't8030.c',
 )])
 
