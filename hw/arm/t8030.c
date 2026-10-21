@@ -2546,6 +2546,19 @@ static void t8030_create_mic_temp_sensor2(AppleT8030MachineState* t8030)
     apple_mic_temp_sensor_create(*(uint8_t*)prop->data, i2c->bus, 1, 0, 0, 5, &error_fatal);
 }
 
+// SPTM uses Advanced SIMD from its first memcpy and never writes CPACR_EL1,
+// so the bootloader must hand over with FP/SIMD enabled at EL1
+// (CPACR_EL1.FPEN = 0b11). arm_set_cpu_on() resets the CPU without that.
+#define CPACR_EL1_FPEN_NOTRAP (3ULL << 20)
+
+static void t8030_sptm_handoff_fp(CPUState* cs, run_on_cpu_data data)
+{
+    ARMCPU* arm_cpu = container_of(cs, ARMCPU, parent_obj);
+
+    arm_cpu->env.cp15.cpacr_el1 |= CPACR_EL1_FPEN_NOTRAP;
+    arm_rebuild_hflags(&arm_cpu->env);
+}
+
 static void t8030_cpu_reset(AppleT8030MachineState* t8030)
 {
     CPUState*      cpu;
@@ -2575,7 +2588,11 @@ static void t8030_cpu_reset(AppleT8030MachineState* t8030)
                 object_property_set_uint(OBJECT(cpu), "rvbar", entry & ~0xFFFULL, &error_abort);
                 cpu_reset(cpu);
             }
-            if (acpu->cpu_id == 0) { arm_set_cpu_on(arm_cpu->mp_affinity, entry, args, 1, true); }
+            if (acpu->cpu_id == 0) {
+                arm_set_cpu_on(arm_cpu->mp_affinity, entry, args, 1, true);
+                // Queued after arm_set_cpu_on()'s reset work, which runs first.
+                if (t8030->sptm != NULL) { async_run_on_cpu(cpu, t8030_sptm_handoff_fp, RUN_ON_CPU_NULL); }
+            }
         }
         else {
             if (acpu->cpu_id != A13_MAX_CPU) {
