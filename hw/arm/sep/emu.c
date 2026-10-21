@@ -695,6 +695,26 @@ OBJECT_DEFINE_TYPE_CLASS_INIT(AppleSEP, apple_sep, APPLE_SEP, APPLE_A7IOP)
 bool apple_sep_get_fuse_changer_bit(AppleSEP* s, uint8_t bit)
 { return apple_sep_pmgr_get_fuse_changer_bit(s->pmgr, bit); }
 
+bool apple_sep_check_image(const char* what, const char* path, const void* data, size_t size, size_t max_size,
+                           Error** errp)
+{
+    const uint8_t* bytes = data;
+
+    if (size == 0) {
+        error_setg(errp, "%s `%s` is empty", what, path);
+        return false;
+    }
+    if (size > max_size) {
+        error_setg(errp, "%s `%s` is %zu bytes, larger than its %zu-byte region", what, path, size, max_size);
+        return false;
+    }
+    if (size == 1 || memcmp(bytes, bytes + 1, size - 1) == 0) {
+        error_setg(errp, "%s `%s` is not a real image: all %zu bytes are 0x%02x", what, path, size, bytes[0]);
+        return false;
+    }
+    return true;
+}
+
 void apple_sep_set_fw(AppleSEP* s, hwaddr sep_fw_addr, gchar* fw_data, gsize sep_fw_size)
 {
     s->sep_fw_addr = sep_fw_addr;
