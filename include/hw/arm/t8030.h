@@ -51,6 +51,8 @@ typedef struct
     MachoHeader64*  kernel;
     AppleDTNode*    device_tree;
     uint8_t*        trustcache;
+    MachoHeader64*  txm;
+    char*           txm_filename;
     char*           securerom;
     gsize           securerom_size;
     AppleBootInfo   boot_info;
