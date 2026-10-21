@@ -213,6 +213,8 @@ option('debug_mutex', type: 'boolean', value: false,
        description: 'mutex debugging support')
 option('debug_stack_usage', type: 'boolean', value: false,
        description: 'measure coroutine stack usage')
+option('system_shared_lib', type: 'boolean', value: false,
+       description: 'also build each system emulator as a shared library exporting qemu_android_main(argc, argv); needs -Db_staticpic=true')
 option('qom_cast_debug', type: 'boolean', value: true,
        description: 'cast debugging support')
 option('slirp_smbd', type : 'feature', value : 'auto',
