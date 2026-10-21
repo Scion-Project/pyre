@@ -139,12 +139,33 @@ struct AddressSpaceDispatch
 };
 
 #define SUBPAGE_IDX(addr) ((addr) & ~TARGET_PAGE_MASK)
+
+/*
+ * A subpage maps byte ranges within one target page to sections. It used to
+ * hold a uint16_t section index for every byte of the page, which is 32 KiB per
+ * subpage with 16 KiB target pages (t8030). Every vCPU has its own root memory
+ * region and so its own FlatView/dispatch, and memory transactions during
+ * machine init leave many old dispatches waiting for RCU, so tens of thousands
+ * of these could be live at once. On Android each 33 KiB allocation is a
+ * separate Scudo secondary mmap plus a guard mapping, which exhausted
+ * vm.max_map_count with -smp 7. In practice a subpage holds only a few ranges,
+ * so keep them as a small sorted list of disjoint [start, end] ranges instead.
+ * Bytes not covered by any range map to PHYS_SECTION_UNASSIGNED.
+ */
+typedef struct SubpageRange
+{
+    uint32_t start; /* offset within the page, inclusive */
+    uint32_t end;   /* offset within the page, inclusive */
+    uint16_t section;
+} SubpageRange;
+
 typedef struct subpage_t
 {
-    MemoryRegion iomem;
-    FlatView*    fv;
-    hwaddr       base;
-    uint16_t     sub_section[];
+    MemoryRegion  iomem;
+    FlatView*     fv;
+    hwaddr        base;
+    unsigned      nr_ranges;
+    SubpageRange* ranges; /* sorted by start, non-overlapping */
 } subpage_t;
 
 #define PHYS_SECTION_UNASSIGNED 0
@@ -312,6 +333,26 @@ static MemoryRegionSection* phys_page_find(AddressSpaceDispatch* d, hwaddr addr)
     }
 }
 
+/* Return the section index covering byte @idx of the subpage's page. */
+static uint16_t subpage_find_section(const subpage_t* subpage, uint32_t idx)
+{
+    unsigned lo = 0, hi = subpage->nr_ranges;
+
+    while (lo < hi) {
+        unsigned            mid = lo + (hi - lo) / 2;
+        const SubpageRange* r   = &subpage->ranges[mid];
+
+        if (idx < r->start) { hi = mid; }
+        else if (idx > r->end) {
+            lo = mid + 1;
+        }
+        else {
+            return r->section;
+        }
+    }
+    return PHYS_SECTION_UNASSIGNED;
+}
+
 /* Called from RCU critical section */
 static MemoryRegionSection* address_space_lookup_region(AddressSpaceDispatch* d, hwaddr addr, bool resolve_subpage)
 {
@@ -324,7 +365,7 @@ static MemoryRegionSection* address_space_lookup_region(AddressSpaceDispatch* d,
     }
     if (resolve_subpage && section->mr->subpage) {
         subpage = container_of(section->mr, subpage_t, iomem);
-        section = &d->map.sections[subpage->sub_section[SUBPAGE_IDX(addr)]];
+        section = &d->map.sections[subpage_find_section(subpage, SUBPAGE_IDX(addr))];
     }
     return section;
 }
@@ -904,6 +945,7 @@ static void phys_section_destroy(MemoryRegion* mr)
     if (have_sub_page) {
         subpage_t* subpage = container_of(mr, subpage_t, iomem);
         object_unref(OBJECT(&subpage->iomem));
+        g_free(subpage->ranges);
         g_free(subpage);
     }
 }
@@ -2073,19 +2115,55 @@ static const MemoryRegionOps subpage_ops = {
     .endianness            = DEVICE_NATIVE_ENDIAN,
 };
 
+static void subpage_range_append(SubpageRange* out, unsigned* n, uint32_t start, uint32_t end, uint16_t section)
+{
+    out[*n].start   = start;
+    out[*n].end     = end;
+    out[*n].section = section;
+    (*n)++;
+}
+
+/*
+ * Map bytes [start, end] of the page to @section, replacing whatever they
+ * mapped before (same semantics as the old per-byte array). Ranges stay sorted
+ * and disjoint. FlatView sections never overlap, so in practice this appends.
+ */
 static int subpage_register(subpage_t* mmio, uint32_t start, uint32_t end, uint16_t section)
 {
-    int idx, eidx;
+    SubpageRange* ranges;
+    unsigned      i, n = 0;
+    bool          placed = false;
 
-    if (start >= TARGET_PAGE_SIZE || end >= TARGET_PAGE_SIZE) { return -1; }
-    idx  = SUBPAGE_IDX(start);
-    eidx = SUBPAGE_IDX(end);
+    if (start >= TARGET_PAGE_SIZE || end >= TARGET_PAGE_SIZE || start > end) { return -1; }
+    start = SUBPAGE_IDX(start);
+    end   = SUBPAGE_IDX(end);
 #if defined(DEBUG_SUBPAGE)
-    printf("%s: %p start %08x end %08x idx %08x eidx %08x section %d\n", __func__, mmio, start, end, idx, eidx,
-           section);
+    printf("%s: %p start %08x end %08x section %d\n", __func__, mmio, start, end, section);
 #endif
-    for (; idx <= eidx; idx++) { mmio->sub_section[idx] = section; }
 
+    /* Each old range can split into at most two pieces around the new one. */
+    ranges = g_new(SubpageRange, 2 * mmio->nr_ranges + 1);
+    for (i = 0; i < mmio->nr_ranges; i++) {
+        const SubpageRange* r = &mmio->ranges[i];
+
+        if (r->end < start) {
+            subpage_range_append(ranges, &n, r->start, r->end, r->section);
+            continue;
+        }
+        if (!placed) {
+            if (r->start < start) { subpage_range_append(ranges, &n, r->start, start - 1, r->section); }
+            subpage_range_append(ranges, &n, start, end, section);
+            placed = true;
+        }
+        if (r->end > end) {
+            subpage_range_append(ranges, &n, MAX(r->start, end + 1), r->end, r->section);
+        }
+    }
+    if (!placed) { subpage_range_append(ranges, &n, start, end, section); }
+
+    g_free(mmio->ranges);
+    mmio->ranges          = g_renew(SubpageRange, ranges, n);
+    mmio->nr_ranges       = n;
     return 0;
 }
 
@@ -2093,8 +2171,8 @@ static subpage_t* subpage_init(FlatView* fv, hwaddr base)
 {
     subpage_t* mmio;
 
-    /* mmio->sub_section is set to PHYS_SECTION_UNASSIGNED with g_malloc0 */
-    mmio       = g_malloc0(sizeof(subpage_t) + TARGET_PAGE_SIZE * sizeof(uint16_t));
+    /* No ranges yet: every byte maps to PHYS_SECTION_UNASSIGNED. */
+    mmio       = g_new0(subpage_t, 1);
     mmio->fv   = fv;
     mmio->base = base;
     memory_region_init_io(&mmio->iomem, NULL, &subpage_ops, mmio, NULL, TARGET_PAGE_SIZE);
