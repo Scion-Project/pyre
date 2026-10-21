@@ -356,6 +356,12 @@ typedef struct
     uint64_t      tz0_size;
     hwaddr        kern_boot_args_addr;
     uint64_t      kern_boot_args_size;
+    hwaddr        sptm_phys_base;
+    vaddr         sptm_virt_base;
+    uint64_t      sptm_size;
+    hwaddr        sptm_entry;
+    hwaddr        sptm_boot_args_addr;
+    hwaddr        sptm_handoff_addr;
     hwaddr        top_of_kernel_data_pa;
     hwaddr        tz1_boot_args_pa;
     hwaddr        dram_base;
@@ -370,6 +376,9 @@ typedef struct
 } AppleBootInfo;
 
 MachoHeader64* apple_boot_load_kernel(const char* filename, MachoHeader64** secure_monitor);
+
+/// Load an SPTM image (IM4P type `sptm`, or a raw Mach-O).
+MachoHeader64* apple_boot_load_sptm(const char* filename);
 
 MachoHeader64* apple_boot_parse_macho(uint8_t* data, uint32_t len);
 
@@ -399,6 +408,14 @@ vaddr apple_boot_fixup_slide_va(vaddr va);
 void* apple_boot_va_to_ptr(vaddr va);
 
 bool apple_boot_contains_boot_arg(const char* boot_args, const char* arg, bool match_prefix);
+
+#define SPTM_BOOT_ARGS_SIZE (0x4000)
+/// SPTM clears 0x17C0 bytes of this region on entry.
+#define SPTM_HANDOFF_SIZE   (0x4000)
+
+/// Write a minimal SPTM boot-info page (see docs/ios27/SPTM-BOOT-SPEC.md in ios-on-pixel).
+void apple_boot_setup_sptm_boot_args(AddressSpace* as, hwaddr addr, uint64_t version, vaddr virt_base,
+                                     hwaddr phys_base, hwaddr mem_size, hwaddr handoff_addr);
 
 void apple_boot_setup_monitor_boot_args(AddressSpace* as, hwaddr addr, vaddr virt_base, hwaddr phys_base,
                                         hwaddr mem_size, hwaddr kern_args, vaddr kern_entry, hwaddr kern_phys_base,

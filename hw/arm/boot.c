@@ -24,6 +24,7 @@
 #include "hw/arm/dt.h"
 #include "hw/arm/mem.h"
 #include "qapi/error.h"
+#include "qemu/bswap.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/guest-random.h"
@@ -762,6 +763,36 @@ bool apple_boot_contains_boot_arg(const char* boot_args, const char* arg, bool m
     return false;
 }
 
+// SPTM boot info, as read by SPTM's start-up code (x0 on entry). The first
+// words match the XNU boot-args layout: SPTM loads them into x22/x23/x24 and
+// rounds phys_base up to 32 MiB exactly like XNU's start.s does.
+//   +0x000  version; SPTM requires >= 3 to take the handoff-region path
+//   +0x008  virt_base (VA that maps to phys_base)
+//   +0x010  phys_base
+//   +0x018  mem_size
+//   +0x480  pointer to a handoff region SPTM clears (0x17C0 bytes) and tags
+// The rest of the structure (region descriptors, page-table pool) is not
+// mapped out yet and is left zero.
+#define SPTM_BOOT_ARGS_VERSION     (0x000)
+#define SPTM_BOOT_ARGS_VIRT_BASE   (0x008)
+#define SPTM_BOOT_ARGS_PHYS_BASE   (0x010)
+#define SPTM_BOOT_ARGS_MEM_SIZE    (0x018)
+#define SPTM_BOOT_ARGS_HANDOFF_PTR (0x480)
+
+void apple_boot_setup_sptm_boot_args(AddressSpace* as, hwaddr addr, uint64_t version, vaddr virt_base,
+                                     hwaddr phys_base, hwaddr mem_size, hwaddr handoff_addr)
+{
+    g_autofree uint8_t* buf = g_malloc0(SPTM_BOOT_ARGS_SIZE);
+
+    stq_le_p(buf + SPTM_BOOT_ARGS_VERSION, version);
+    stq_le_p(buf + SPTM_BOOT_ARGS_VIRT_BASE, virt_base);
+    stq_le_p(buf + SPTM_BOOT_ARGS_PHYS_BASE, phys_base);
+    stq_le_p(buf + SPTM_BOOT_ARGS_MEM_SIZE, mem_size);
+    stq_le_p(buf + SPTM_BOOT_ARGS_HANDOFF_PTR, handoff_addr);
+
+    address_space_rw(as, addr, MEMTXATTRS_UNSPECIFIED, buf, SPTM_BOOT_ARGS_SIZE, true);
+}
+
 void apple_boot_setup_monitor_boot_args(AddressSpace* as, hwaddr addr, vaddr virt_base, hwaddr phys_base,
                                         hwaddr mem_size, hwaddr kern_args, vaddr kern_entry, hwaddr kern_phys_base,
                                         hwaddr kern_phys_slide, vaddr kern_virt_slide, vaddr kern_text_section_off)
@@ -912,6 +943,31 @@ MachoHeader64* apple_boot_load_kernel(const char* filename, MachoHeader64** secu
         ((MachoHeader64 *)data)->magic != MACH_MAGIC_64) {
         error_setg(&error_fatal, "`%s` does not contain a 64-bit Mach-O kernel",
                    filename);
+        g_free(data);
+        return NULL;
+    }
+
+    header = apple_boot_parse_macho(data, len);
+    g_free(data);
+    return header;
+}
+
+MachoHeader64* apple_boot_load_sptm(const char* filename)
+{
+    uint32_t       len;
+    uint8_t*       data = NULL;
+    char           payload_type[4];
+    MachoHeader64* header;
+
+    extract_im4p_payload(filename, payload_type, &data, &len, NULL);
+
+    if (memcmp(payload_type, "sptm", 4) != 0 && memcmp(payload_type, "raw", 4) != 0) {
+        error_setg(&error_fatal, "`%s` is a `%.4s` object (expected `sptm`)", filename, payload_type);
+        return NULL;
+    }
+
+    if (len < sizeof(MachoHeader64) || ((MachoHeader64*)data)->magic != MACH_MAGIC_64) {
+        error_setg(&error_fatal, "`%s` does not contain a 64-bit Mach-O SPTM", filename);
         g_free(data);
         return NULL;
     }
