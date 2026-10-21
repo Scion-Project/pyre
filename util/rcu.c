@@ -258,9 +258,15 @@ static void* call_rcu_thread(void* opaque)
         /* Heuristically wait for a decent number of callbacks to pile up.
          * Fetch rcu_call_count now, we only must process elements that were
          * added before synchronize_rcu() starts.
+         *
+         * With nothing queued, park on the event straight away rather than
+         * sleeping first: the sleep only helps to batch callbacks that exist.
+         * An idle thread that wakes up 10 ms later anyway races with a
+         * short-lived process (e.g. -M help) exiting around then; under ARM
+         * translation on Android that tears the thread down mid-run (FORTIFY
+         * abort on a destroyed mutex, or SIGSEGV).
          */
         while (n == 0 || (n < RCU_CALL_MIN_SIZE && ++tries <= 5)) {
-            g_usleep(10000);
             if (n == 0) {
                 qemu_event_reset(&rcu_call_ready_event);
                 n = qatomic_read(&rcu_call_count);
@@ -270,6 +276,8 @@ static void* call_rcu_thread(void* opaque)
 #endif
                     qemu_event_wait(&rcu_call_ready_event);
                 }
+            } else {
+                g_usleep(10000);
             }
             n = qatomic_read(&rcu_call_count);
         }
