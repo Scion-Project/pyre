@@ -5,7 +5,7 @@
  *
  * Bare-metal AArch64, entered at EL1 with the MMU off on the `a13-test`
  * machine (one AppleA13 core, the CPU type t8030 uses). It:
- *   1. installs EL1 and guarded (GXF_ABORT_EL1, and VBAR_GL11 once in GL1)
+ *   1. installs EL1 and guarded (GXF_ABORT_EL1, and VBAR_GL1 once in GL1)
  *      vectors whose every entry reports FAIL with the ESR, so any UNDEF - a
  *      register the model does not define - fails the test closed;
  *   2. at EL1, MSR/MRS round-trips every placeholder register added for
@@ -14,8 +14,8 @@
  *      accessible, writing back the value read so their state is unchanged;
  *   3. reproduces SPTM's bootstrap prologue in miniature: GXF_CONFIG_EL1 = 1,
  *      GXF_ENTER_EL1 = handler, GENTER; checks GXF_STATUS_EL1 says guarded,
- *      round-trips the GXF-space registers from GL1, then GEXITs and checks
- *      GXF_STATUS_EL1 says not guarded;
+ *      round-trips the GXF-space registers from GL1, then GEXITs (which
+ *      returns after the GENTER) and checks GXF_STATUS_EL1 says not guarded;
  *   4. reports PASS.
  *
  * Results go to the a13-test control block (hw/arm/a13-test.c), which turns
@@ -121,11 +121,11 @@ _start:
     adr     x0, gl1_entry
     msr     s3_6_c15_c8_1, x0          /* GXF_ENTER_EL1 = gl1_entry */
     isb
+    mov     x20, #0                    /* set to 1 by gl1_entry */
     .inst   0x00201420                 /* GENTER -> gl1_entry, guarded */
-    b       not_entered                /* GENTER must not fall through */
 
-guarded_done:
-    /* back at non-guarded EL1 (GEXIT returns to ELR_GL11) */
+    /* GEXIT returns here: ELR_GL1 = GENTER + 4, like a kernel->SPTM call */
+    cbz     x20, not_entered           /* GENTER did not run gl1_entry */
     CHECK_GUARDED 0
     ldr     x1, =CTL_BASE
     ldr     x0, =PASS_TOKEN
@@ -135,21 +135,20 @@ guarded_done:
     b       1b
 
 gl1_entry:
-    /* VBAR_GL11 is only accessible while guarded (as in SPTM, which sets it
-     * right after its first GENTER); a fault before this line hangs and is
-     * caught by the runner's timeout */
+    /* While guarded, the EL1 names (VBAR_EL1, ELR_EL1, ...) address the GL1
+     * bank and the *_GL11 names the non-guarded EL1 copies. Point the GL1
+     * vectors at the fail table first; a fault before that hangs and is
+     * caught by the runner's timeout. */
     adr     x0, vectors
-    msr     s3_6_c15_c9_2, x0          /* VBAR_GL11 */
+    msr     vbar_el1, x0               /* VBAR_GL1 */
     isb
     CHECK_GUARDED 1
     /* the GXF-space registers again, from guarded mode */
     CHECK_RW 6, 15, 0, 0, 0xfeedfacefeedface
     CHECK_RW 6, 15, 8, 7, 0x1357246813572468
     CHECK_WB 6, 15, 2, 0
-    adr     x0, guarded_done
-    msr     s3_6_c15_c9_6, x0          /* ELR_GL11 = guarded_done */
-    isb
-    .inst   0x00201400                 /* GEXIT -> guarded_done */
+    mov     x20, #1
+    .inst   0x00201400                 /* GEXIT -> GENTER + 4 */
     b       not_entered                /* GEXIT must not fall through */
 
 /* value mismatch: DETAIL = value read back */
