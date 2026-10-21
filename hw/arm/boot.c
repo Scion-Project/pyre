@@ -762,6 +762,30 @@ bool apple_boot_contains_boot_arg(const char* boot_args, const char* arg, bool m
     return false;
 }
 
+// SPTM boot info: the XNU boot-args structure (revision 3, 0x480 bytes)
+// followed by one pointer, 0x488 bytes in all. SPTM's start-up code checks
+// the first word is >= 3, loads virt_base/phys_base/mem_size and rounds them
+// like XNU's start.s, then copies exactly 0x488 bytes and walks the device
+// tree at +0x60/+0x68. The trailing pointer is a handoff region SPTM clears
+// (0x17C0 bytes) and tags before using.
+#define SPTM_BOOT_ARGS_HANDOFF_PTR (0x480)
+
+void apple_boot_setup_sptm_boot_args(uint32_t build_version, AddressSpace* as, hwaddr addr, vaddr virt_base,
+                                     hwaddr phys_base, hwaddr mem_size, hwaddr kernel_top, vaddr dtb_va,
+                                     vaddr dtb_size, AppleVideoArgs* video_args, const char* cmdline,
+                                     hwaddr mem_size_actual, hwaddr handoff_addr)
+{
+    uint64_t handoff = cpu_to_le64(handoff_addr);
+
+    QEMU_BUILD_BUG_ON(sizeof(AppleKernelBootArgsRev3) != SPTM_BOOT_ARGS_HANDOFF_PTR);
+    assert_cmpuint(BUILD_VERSION_MAJOR(build_version), >=, 17);
+
+    address_space_set(as, addr, 0, SPTM_BOOT_ARGS_SIZE, MEMTXATTRS_UNSPECIFIED);
+    apple_boot_setup_bootargs(build_version, as, addr, virt_base, phys_base, mem_size, kernel_top, dtb_va, dtb_size,
+                              video_args, cmdline, mem_size_actual);
+    address_space_write(as, addr + SPTM_BOOT_ARGS_HANDOFF_PTR, MEMTXATTRS_UNSPECIFIED, &handoff, sizeof(handoff));
+}
+
 void apple_boot_setup_monitor_boot_args(AddressSpace* as, hwaddr addr, vaddr virt_base, hwaddr phys_base,
                                         hwaddr mem_size, hwaddr kern_args, vaddr kern_entry, hwaddr kern_phys_base,
                                         hwaddr kern_phys_slide, vaddr kern_virt_slide, vaddr kern_text_section_off)

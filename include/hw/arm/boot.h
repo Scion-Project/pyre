@@ -359,6 +359,12 @@ typedef struct
     uint64_t      tz0_size;
     hwaddr        kern_boot_args_addr;
     uint64_t      kern_boot_args_size;
+    hwaddr        sptm_phys_base;
+    vaddr         sptm_virt_base;
+    uint64_t      sptm_size;
+    hwaddr        sptm_entry;
+    hwaddr        sptm_boot_args_addr;
+    hwaddr        sptm_handoff_addr;
     hwaddr        top_of_kernel_data_pa;
     hwaddr        tz1_boot_args_pa;
     hwaddr        dram_base;
@@ -406,6 +412,17 @@ vaddr apple_boot_fixup_slide_va(vaddr va);
 void* apple_boot_va_to_ptr(vaddr va);
 
 bool apple_boot_contains_boot_arg(const char* boot_args, const char* arg, bool match_prefix);
+
+#define SPTM_BOOT_ARGS_SIZE (0x4000)
+/// SPTM clears 0x17C0 bytes of this region on entry.
+#define SPTM_HANDOFF_SIZE   (0x4000)
+
+/// Write SPTM's boot info: the kernel boot-args (revision 3) followed by the
+/// handoff-region pointer (see docs/ios27/SPTM-BOOT-SPEC.md in ios-on-pixel).
+void apple_boot_setup_sptm_boot_args(uint32_t build_version, AddressSpace* as, hwaddr addr, vaddr virt_base,
+                                     hwaddr phys_base, hwaddr mem_size, hwaddr kernel_top, vaddr dtb_va,
+                                     vaddr dtb_size, AppleVideoArgs* video_args, const char* cmdline,
+                                     hwaddr mem_size_actual, hwaddr handoff_addr);
 
 void apple_boot_setup_monitor_boot_args(AddressSpace* as, hwaddr addr, vaddr virt_base, hwaddr phys_base,
                                         hwaddr mem_size, hwaddr kern_args, vaddr kern_entry, hwaddr kern_phys_base,
