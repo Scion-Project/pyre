@@ -1,0 +1,6 @@
+# See docs/devel/tracing.rst for syntax documentation.
+
+# mt-spi.c
+apple_mt_spi_mtt_event(const char *type, int64_t slot, int64_t tracking_id, const char *axis, int64_t value) "%s slot %" PRId64 " id %" PRId64 " %s %" PRId64
+apple_mt_spi_frame(uint8_t frame, uint8_t paths) "frame %u: %u paths"
+apple_mt_spi_frame_path(uint8_t frame, uint8_t path_id, uint8_t stage, uint8_t finger_id, int x, int y, uint16_t flags) "frame %u path %u stage %u finger %u x %d y %d flags 0x%x"
