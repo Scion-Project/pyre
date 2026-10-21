@@ -49,6 +49,7 @@ typedef struct
     AppleA13Cluster clusters[A13_MAX_CLUSTER];
     SysBusDevice*   aic;
     MachoHeader64*  kernel;
+    MachoHeader64*  sptm;
     AppleDTNode*    device_tree;
     uint8_t*        trustcache;
     MachoHeader64*  txm;
@@ -61,6 +62,7 @@ typedef struct
     char*           sep_rom_filename;
     char*           sep_fw_filename;
     char*           securerom_filename;
+    char*           sptm_filename;
     uint32_t        sio_protocol;
     uint32_t        build_version;
     uint64_t        ecid;
