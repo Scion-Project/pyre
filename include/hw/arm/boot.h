@@ -350,6 +350,9 @@ typedef struct
     uint64_t      ramdisk_size;
     hwaddr        trustcache_addr;
     uint64_t      trustcache_size;
+    hwaddr        txm_phys_base;
+    hwaddr        txm_entry;
+    uint64_t      txm_size;
     hwaddr        sep_fw_addr;
     uint64_t      sep_fw_size;
     hwaddr        tz0_addr;
@@ -370,6 +373,10 @@ typedef struct
 } AppleBootInfo;
 
 MachoHeader64* apple_boot_load_kernel(const char* filename, MachoHeader64** secure_monitor);
+
+/// Load a standalone monitor image (e.g. TXM/SPTM) from an IM4P and parse it as
+/// a Mach-O. `expected_type` is the 4CC payload type to require (e.g. "trxm").
+MachoHeader64* apple_boot_load_monitor(const char* filename, const char* expected_type);
 
 MachoHeader64* apple_boot_parse_macho(uint8_t* data, uint32_t len);
 
