@@ -1044,12 +1044,12 @@ void tlb_set_page_full(CPUState* cpu, int mmu_idx, vaddr addr, CPUTLBEntryFull* 
     CPUTLB*              tlb  = &cpu->neg.tlb;
     CPUTLBDesc*          desc = &tlb->d[mmu_idx];
     MemoryRegionSection* section;
-    unsigned int         index, read_flags, write_flags;
+    unsigned int         index, read_flags, write_flags, code_flags, load_flags;
     uintptr_t            addend;
     CPUTLBEntry *        te, tn;
     hwaddr               iotlb, xlat, sz, paddr_page;
     vaddr                addr_page;
-    int                  asidx, wp_flags, prot;
+    int                  asidx, wp_flags, prot, iommu_denied;
     bool                 is_ram, is_romd;
 
     assert_cpu_is_self(cpu);
@@ -1066,6 +1066,15 @@ void tlb_set_page_full(CPUState* cpu, int mmu_idx, vaddr addr, CPUTLBEntryFull* 
     asidx   = cpu_asidx_from_attrs(cpu, full->attrs);
     section = address_space_translate_for_iotlb(cpu, asidx, paddr_page, &xlat, &sz, full->attrs, &prot);
     assert(sz >= TARGET_PAGE_SIZE);
+
+    /*
+     * Access types the CPU's own translation allows but an IOMMU on the way
+     * denies (e.g. writes through a read-only DART mapping). They must fail
+     * like accesses to unassigned memory. Simply leaving their comparator
+     * disabled is not enough: the lookup that just filled this entry would then
+     * take the access as RAM and reach the page anyway.
+     */
+    iommu_denied = full->prot & ~prot & (PAGE_READ | PAGE_WRITE | PAGE_EXEC);
 
     tlb_debug("vaddr=%016" VADDR_PRIx " paddr=0x" HWADDR_FMT_plx " prot=%x idx=%d\n", addr, full->phys_addr, prot,
               mmu_idx);
@@ -1172,10 +1181,22 @@ void tlb_set_page_full(CPUState* cpu, int mmu_idx, vaddr addr, CPUTLBEntryFull* 
     /* Now calculate the new entry */
     tn.addend = addend - addr_page;
 
-    tlb_set_compare(full, &tn, addr_page, read_flags, MMU_INST_FETCH, prot & PAGE_EXEC);
+    code_flags = read_flags;
+    load_flags = read_flags;
+    if (unlikely(iommu_denied)) {
+        /* Send each denied access type down the I/O path, where it fails. */
+        const unsigned int denied = TLB_MMIO | TLB_IOMMU_DENIED;
 
-    if (wp_flags & BP_MEM_READ) { read_flags |= TLB_WATCHPOINT; }
-    tlb_set_compare(full, &tn, addr_page, read_flags, MMU_DATA_LOAD, prot & PAGE_READ);
+        if (iommu_denied & PAGE_EXEC) { code_flags = (read_flags & TLB_INVALID_MASK) | denied; }
+        if (iommu_denied & PAGE_READ) { load_flags = (read_flags & TLB_INVALID_MASK) | denied; }
+        if (iommu_denied & PAGE_WRITE) { write_flags = (write_flags & TLB_INVALID_MASK) | denied; }
+        prot |= iommu_denied;
+    }
+
+    tlb_set_compare(full, &tn, addr_page, code_flags, MMU_INST_FETCH, prot & PAGE_EXEC);
+
+    if (wp_flags & BP_MEM_READ) { load_flags |= TLB_WATCHPOINT; }
+    tlb_set_compare(full, &tn, addr_page, load_flags, MMU_DATA_LOAD, prot & PAGE_READ);
 
     if (prot & PAGE_WRITE_INV) { write_flags |= TLB_INVALID_MASK; }
     if (wp_flags & BP_MEM_WRITE) { write_flags |= TLB_WATCHPOINT; }
@@ -1274,6 +1295,22 @@ static void io_failed(CPUState* cpu, CPUTLBEntryFull* full, vaddr addr, unsigned
         cpu->cc->tcg_ops->do_transaction_failed(cpu, physaddr, addr, size, access_type, mmu_idx, full->attrs, response,
                                                 retaddr);
     }
+}
+
+/*
+ * An access type an IOMMU denies (TLB_IOMMU_DENIED) never reaches the page: it
+ * fails exactly like an access to unassigned memory (a decode error, so a bus
+ * error for the guest; reads as zero and ignored writes if the CPU ignores
+ * transaction failures).
+ */
+static inline bool io_iommu_denied(CPUTLBEntryFull* full, MMUAccessType access_type, vaddr addr, unsigned size)
+{
+    if (likely(!(full->slow_flags[access_type] & TLB_IOMMU_DENIED))) { return false; }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "IOMMU denied %s of %u bytes at vaddr 0x%" VADDR_PRIx " (phys 0x" HWADDR_FMT_plx ")\n",
+                  access_type == MMU_DATA_STORE ? "write" : (access_type == MMU_INST_FETCH ? "fetch" : "read"), size,
+                  addr, full->phys_addr | (addr & ~TARGET_PAGE_MASK));
+    return true;
 }
 
 /* Return true if ADDR is present in the victim tlb, and has been copied
@@ -1843,7 +1880,13 @@ static uint64_t int_ld_mmio_beN(CPUState* cpu, CPUTLBEntryFull* full, uint64_t r
         this_size  = 1 << this_mop;
         this_mop  |= MO_BE;
 
-        r = memory_region_dispatch_read(mr, mr_offset, &val, this_mop, full->attrs);
+        if (unlikely(io_iommu_denied(full, type, addr, this_size))) {
+            val = 0;
+            r   = MEMTX_DECODE_ERROR;
+        }
+        else {
+            r = memory_region_dispatch_read(mr, mr_offset, &val, this_mop, full->attrs);
+        }
         if (unlikely(r != MEMTX_OK)) { io_failed(cpu, full, addr, this_size, type, mmu_idx, r, ra); }
         if (this_size == 8) { return val; }
 
@@ -2312,7 +2355,10 @@ static uint64_t int_st_mmio_leN(CPUState* cpu, CPUTLBEntryFull* full, uint64_t v
         this_size  = 1 << this_mop;
         this_mop  |= MO_LE;
 
-        r = memory_region_dispatch_write(mr, mr_offset, val_le, this_mop, full->attrs);
+        if (unlikely(io_iommu_denied(full, MMU_DATA_STORE, addr, this_size))) { r = MEMTX_DECODE_ERROR; }
+        else {
+            r = memory_region_dispatch_write(mr, mr_offset, val_le, this_mop, full->attrs);
+        }
         if (unlikely(r != MEMTX_OK)) { io_failed(cpu, full, addr, this_size, MMU_DATA_STORE, mmu_idx, r, ra); }
         if (this_size == 8) { return 0; }
 

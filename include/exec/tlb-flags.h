@@ -33,8 +33,15 @@
 #define TLB_DISCARD_WRITE (1 << 3)
 /* Set if TLB entry is an IO callback.  */
 #define TLB_MMIO (1 << 4)
+/*
+ * Set (together with TLB_MMIO) if an IOMMU denies this access type although
+ * the CPU's own translation allows it: the access fails like one to unassigned
+ * memory instead of reaching the page.
+ */
+#define TLB_IOMMU_DENIED (1 << 5)
 
-#define TLB_SLOW_FLAGS_MASK (TLB_BSWAP | TLB_WATCHPOINT | TLB_CHECK_ALIGNED | TLB_DISCARD_WRITE | TLB_MMIO)
+#define TLB_SLOW_FLAGS_MASK                                                                                            \
+    (TLB_BSWAP | TLB_WATCHPOINT | TLB_CHECK_ALIGNED | TLB_DISCARD_WRITE | TLB_MMIO | TLB_IOMMU_DENIED)
 
 /*
  * Flags stored in CPUTLBEntry.addr_idx[x].
