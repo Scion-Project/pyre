@@ -921,6 +921,35 @@ MachoHeader64* apple_boot_load_kernel(const char* filename, MachoHeader64** secu
     return header;
 }
 
+MachoHeader64* apple_boot_load_monitor(const char* filename, const char* expected_type)
+{
+    uint32_t       len;
+    uint8_t*       data = NULL;
+    char           payload_type[4];
+    MachoHeader64* header;
+
+    // TXM/SPTM ship as IM4Ps too; the PAYP-aware decoder and LZFSE path handle
+    // them exactly like the kernelcache.
+    extract_im4p_payload(filename, payload_type, &data, &len, NULL);
+
+    if (memcmp(payload_type, expected_type, 4) != 0) {
+        error_setg(&error_fatal, "`%s` is a `%.4s` object (expected `%.4s`)", filename, payload_type, expected_type);
+        return NULL;
+    }
+
+    // Release builds compile out the asserts in apple_boot_parse_macho, so
+    // reject non-Mach-O payloads here instead of reading past the buffer.
+    if (len < sizeof(MachoHeader64) || ((MachoHeader64*)data)->magic != MACH_MAGIC_64) {
+        error_setg(&error_fatal, "`%s` does not contain a 64-bit Mach-O monitor", filename);
+        g_free(data);
+        return NULL;
+    }
+
+    header = apple_boot_parse_macho(data, len);
+    g_free(data);
+    return header;
+}
+
 MachoHeader64* apple_boot_parse_macho(uint8_t* data, uint32_t len)
 {
     uint8_t*          phys_base;
