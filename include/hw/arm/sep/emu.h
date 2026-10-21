@@ -70,3 +70,12 @@ void      apple_sep_set_fw(AppleSEP* s, hwaddr sep_fw_addr, gchar* fw_data, gsiz
 void      apple_sep_map_mmio(AppleSEP* s, AppleSEPMMIOIndex mmio_index, hwaddr addr);
 void      apple_sep_setup_tz0(AppleSEP* s, MemoryRegion* dram, hwaddr tz0_off, hwaddr tz0_size);
 ARMCPU*   apple_sep_get_cpu(AppleSEP* s);    // FIXME: remove
+
+/*
+ * Check that a SEP ROM or SEP firmware image could be real before loading it:
+ * not empty, no larger than the region it is loaded into, and not one byte
+ * repeated (a zero-filled placeholder, for example). The format is not checked,
+ * so every real image passes. On failure, sets @errp and returns false.
+ */
+bool apple_sep_check_image(const char* what, const char* path, const void* data, size_t size, size_t max_size,
+                           Error** errp);
