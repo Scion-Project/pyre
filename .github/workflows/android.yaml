@@ -1,0 +1,125 @@
+# Cross-builds qemu-system-aarch64 for Android arm64 (the binary the
+# ios-on-pixel app ships), so emulator PRs to master are checked against the
+# real target toolchain and not only the upstream Linux/macOS host builds in
+# build.yaml.
+#
+# It reuses ios-on-pixel's native/build-android.sh rather than duplicating its
+# dependency list and meson options: ios-on-pixel is checked out next to this
+# revision and the script is pointed at it with INFERNO_SRC.
+#
+# Runner: macOS is required (the script probes the host compiler through
+# xcode-select/DEVELOPER_DIR and uses `shasum` and `sysctl`). NDK r28 ships only
+# a darwin-x86_64 toolchain, which runs under Rosetta 2 on the arm64 image.
+
+name: android
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      ios_on_pixel_ref:
+        description: ios-on-pixel branch/tag/SHA that provides native/build-android.sh
+        default: main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IOS_ON_PIXEL_REF: ${{ inputs.ios_on_pixel_ref || 'main' }}
+  ANDROID_NDK_VERSION: "28.2.13676358"
+
+jobs:
+  qemu-android-arm64:
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - name: Checkout Inferno (this revision)
+        uses: actions/checkout@v4.2.2
+        with:
+          path: inferno
+
+      - name: Checkout ios-on-pixel (build script)
+        uses: actions/checkout@v4.2.2
+        with:
+          repository: dylanneve1/ios-on-pixel
+          ref: ${{ env.IOS_ON_PIXEL_REF }}
+          path: ios-on-pixel
+          # Its third_party/inferno submodule is not needed: INFERNO_SRC points
+          # the script at the checkout above.
+          submodules: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3.2.2
+        with:
+          # The default ("tools platform-tools") asks for the obsolete `tools`
+          # package, which sdkmanager no longer has (exit 1).
+          packages: platform-tools
+
+      - name: Install NDK r28
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Ensure Rosetta 2 (NDK toolchain is darwin-x86_64)
+        run: softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Install host build tools (Homebrew)
+        run: brew install meson ninja pkgconf cmake
+
+      # Both caches are keyed on build-android.sh: the dependency URLs, sha256
+      # sums and build flags all live there, so any change to it invalidates
+      # them. The sysroot's *.pc files hold absolute paths, which stay valid
+      # because the workspace path is stable for this repo.
+      - name: Cache dependency tarballs
+        uses: actions/cache@v4.2.0
+        with:
+          path: ios-on-pixel/native/build/dl
+          key: deps-dl-${{ runner.os }}-${{ hashFiles('ios-on-pixel/native/build-android.sh') }}
+
+      - name: Cache static sysroot
+        id: sysroot-cache
+        uses: actions/cache@v4.2.0
+        with:
+          path: ios-on-pixel/native/build/sysroot
+          key: deps-sysroot-${{ runner.os }}-ndk${{ env.ANDROID_NDK_VERSION }}-${{ hashFiles('ios-on-pixel/native/build-android.sh') }}
+
+      # `all` = deps + qemu. On a sysroot cache hit only qemu is built (the
+      # deps step would otherwise rebuild everything into the restored prefix).
+      - name: Cross-build (native/build-android.sh)
+        env:
+          INFERNO_SRC: ${{ github.workspace }}/inferno
+          WHAT: ${{ steps.sysroot-cache.outputs.cache-hit == 'true' && 'qemu' || 'all' }}
+        run: |
+          echo "build-android.sh $WHAT (ios-on-pixel@$(git -C ios-on-pixel rev-parse --short HEAD), Inferno@$(git -C inferno rev-parse --short HEAD))"
+          ios-on-pixel/native/build-android.sh "$WHAT"
+
+      - name: Collect stripped binary
+        run: |
+          so=ios-on-pixel/app/src/main/jniLibs/arm64-v8a/libqemu-system-aarch64.so
+          test -s "$so" || { echo "missing build output: $so"; exit 1; }
+          mkdir -p dist
+          cp "$so" dist/qemu-system-aarch64
+          file dist/qemu-system-aarch64
+          ls -lh dist/qemu-system-aarch64
+
+      - name: Upload qemu-system-aarch64
+        uses: actions/upload-artifact@v4.6.0
+        with:
+          name: qemu-system-aarch64-android-arm64
+          path: dist/qemu-system-aarch64
+          if-no-files-found: error
+          retention-days: 14
