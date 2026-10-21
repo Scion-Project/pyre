@@ -916,7 +916,7 @@ void write_neon_element64(TCGv_i64 src, int reg, int ele, MemOp memop)
     }
 }
 
-static void gen_goto_ptr(void) { tcg_gen_lookup_and_goto_ptr(); }
+static void gen_goto_ptr(void) { gen_lookup_and_goto_ptr(); }
 
 /* This will end the TB but doesn't guarantee we'll return to
  * cpu_loop_exec. Any live exit_requests will be processed as we
