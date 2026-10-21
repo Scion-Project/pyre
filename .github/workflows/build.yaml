@@ -1,8 +1,14 @@
 name: build
 on:
+  # Pushes to feature branches are already covered by their pull_request run;
+  # building both doubled our macOS jobs and starved the shared runner pool.
   push:
-    branches:
+    branches: [master]
   pull_request:
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build_linux:
