@@ -4442,7 +4442,7 @@ precision80:
                 case float_round_to_zero     : increment = 0; break;
                 case float_round_up          : increment = !zSign && zSig1; break;
                 case float_round_down        : increment = zSign && zSig1; break;
-                default                      : qemu_build_not_reached();
+                default                      : assert_not_reached();
             }
             if (increment) {
                 ++zSig0;

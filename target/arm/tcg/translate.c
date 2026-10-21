@@ -1749,7 +1749,7 @@ static void gen_srs(DisasContext* s, uint32_t mode, uint32_t amode, bool writeba
             case 1 : offset = 4; break;
             case 2 : offset = -4; break;
             case 3 : offset = 0; break;
-            default: qemu_build_not_reached();
+            default: assert_not_reached();
         }
         tcg_gen_addi_i32(addr, addr, offset);
         gen_helper_set_r13_banked(tcg_env, tcg_constant_i32(mode), addr);

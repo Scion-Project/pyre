@@ -1339,7 +1339,7 @@ static void tgen_brcondi(TCGContext* s, TCGType ext, TCGCond c, TCGReg a, tcg_ta
         switch (c) {
             case TCG_COND_TSTEQ: tcg_out_insn(s, 3205, TBZ, a, tbit, 0); break;
             case TCG_COND_TSTNE: tcg_out_insn(s, 3205, TBNZ, a, tbit, 0); break;
-            default            : qemu_build_not_reached();
+            default            : assert_not_reached();
         }
     }
     else {
@@ -1347,7 +1347,7 @@ static void tgen_brcondi(TCGContext* s, TCGType ext, TCGCond c, TCGReg a, tcg_ta
         switch (c) {
             case TCG_COND_EQ: tcg_out_insn(s, 3201, CBZ, ext, a, 0); break;
             case TCG_COND_NE: tcg_out_insn(s, 3201, CBNZ, ext, a, 0); break;
-            default         : qemu_build_not_reached();
+            default         : assert_not_reached();
         }
     }
 }
