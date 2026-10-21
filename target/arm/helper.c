@@ -1405,7 +1405,7 @@ static uint64_t gt_indirect_access_timer_offset(CPUARMState* env, int timeridx)
         case GTIMER_HYPVIRT   :
         case GTIMER_S_EL2_PHYS:
         case GTIMER_S_EL2_VIRT: return 0;
-        default               : qemu_build_not_reached();
+        default               : assert_not_reached();
     }
 }
 
