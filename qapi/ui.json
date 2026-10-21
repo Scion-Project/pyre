@@ -1185,6 +1185,9 @@
 #
 # @cocoa: The Cocoa user interface.
 #
+# @android: Draw into an Android window handed over by the host app;
+#     only in the in-process shared library build.  (since: 10.2)
+#
 # Since: 2.12
 ##
 { 'enum'    : 'DisplayType',
@@ -1194,7 +1197,8 @@
     { 'name': 'gtk', 'if': 'CONFIG_GTK' },
     { 'name': 'sdl', 'if': 'CONFIG_SDL' },
     { 'name': 'curses', 'if': 'CONFIG_CURSES' },
-    { 'name': 'cocoa', 'if': 'CONFIG_COCOA' }
+    { 'name': 'cocoa', 'if': 'CONFIG_COCOA' },
+    { 'name': 'android', 'if': 'CONFIG_ANDROID_DISPLAY' }
   ]
 }
 
