@@ -231,6 +231,34 @@ static void t8030_patch_kernel(MachoHeader64* header, uint32_t build_version, co
     }
 }
 
+// iOS 27 is the first t8030 release whose kernel hands page tables and code
+// signing to SPTM/TXM; those kernels carry these segments.
+static bool t8030_kernel_uses_sptm(MachoHeader64* kernel)
+{
+    return apple_boot_get_segment(kernel, "__DATA_SPTM") != NULL ||
+           apple_boot_get_segment(kernel, "__TEXT_BOOT_EXEC") != NULL;
+}
+
+// `-M t8030,patch-check=on -kernel <kc>`: apply the kernel patches in memory,
+// report which ones matched, then exit. Needs nothing but the kernel, so new
+// releases can be triaged before the rest of the boot chain supports them.
+static void t8030_kernel_patch_check(MachineState* machine)
+{
+    MachoHeader64* kernel = apple_boot_load_kernel(machine->kernel_filename, NULL);
+    uint32_t       build_version;
+    vaddr          kc_end;
+
+    build_version = apple_boot_build_version(kernel);
+    info_report("patch-check: %s %u.%u.%u, SPTM/TXM: %s", apple_boot_platform_string(kernel),
+                BUILD_VERSION_MAJOR(build_version), BUILD_VERSION_MINOR(build_version),
+                BUILD_VERSION_PATCH(build_version), t8030_kernel_uses_sptm(kernel) ? "yes" : "no");
+
+    apple_boot_get_kc_bounds(kernel, NULL, &g_virt_base, &kc_end, NULL, NULL);
+    g_phys_base = (hwaddr)apple_boot_get_macho_buffer(kernel);
+    ck_patch_kernel(kernel);
+    exit(0);
+}
+
 static bool t8030_check_panic(AppleT8030MachineState* t8030)
 {
     AppleEmbeddedPanicHeader* panic_info;
@@ -2517,6 +2545,8 @@ static void t8030_init(MachineState* machine)
         // dram_pln0 address 0x200000000 size 0x8000, inside amcc
     }
 
+    if (t8030->patch_check) { t8030_kernel_patch_check(machine); }
+
     t8030->device_tree = apple_boot_load_dt_file(machine->dtb);
     if (t8030->device_tree == NULL) {
         error_setg(&error_fatal, "Failed to load device tree");
@@ -2533,6 +2563,13 @@ static void t8030_init(MachineState* machine)
     info_report("%s %u.%u.%u", apple_boot_platform_string(t8030->kernel), BUILD_VERSION_MAJOR(build_version),
                 BUILD_VERSION_MINOR(build_version), BUILD_VERSION_PATCH(build_version));
     t8030->build_version = build_version;
+
+    if (t8030_kernel_uses_sptm(t8030->kernel)) {
+        error_setg(&error_fatal,
+                   "This kernel boots through SPTM/TXM, which is not emulated yet "
+                   "(upstream: ChefKissInc/Inferno#268)");
+        return;
+    }
 
     switch (BUILD_VERSION_MAJOR(build_version)) {
         case 13:
@@ -2762,6 +2799,7 @@ PROP_STR_GETTER_SETTER(regulatory_model);
 PROP_VISIT_GETTER_SETTER(uint32, disp_width);
 PROP_VISIT_GETTER_SETTER(uint32, disp_height);
 PROP_GETTER_SETTER(bool, enable_pac);
+PROP_GETTER_SETTER(bool, patch_check);
 
 static void t8030_class_init(ObjectClass* klass, const void* data)
 {
@@ -2793,6 +2831,8 @@ static void t8030_class_init(ObjectClass* klass, const void* data)
     object_property_set_default_uint(oprop, 0x1122334455667788);
     object_class_property_set_description(klass, "ecid", "Device ECID");
     object_class_property_add_bool(klass, "kaslr-off", t8030_get_kaslr_off, t8030_set_kaslr_off);
+    object_class_property_add_bool(klass, "patch-check", t8030_get_patch_check, t8030_set_patch_check);
+    object_class_property_set_description(klass, "patch-check", "Apply kernel patches in memory, report, and exit");
     object_class_property_set_description(klass, "kaslr-off", "Disable KASLR");
     object_class_property_add_bool(klass, "force-dfu", t8030_get_force_dfu, t8030_set_force_dfu);
     object_class_property_set_description(klass, "force-dfu", "Force DFU");

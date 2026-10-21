@@ -83,4 +83,5 @@ typedef struct
     uint32_t        disp_width;
     uint32_t        disp_height;
     bool            enable_pac;
+    bool            patch_check;
 } AppleT8030MachineState;
