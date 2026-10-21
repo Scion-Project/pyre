@@ -5,9 +5,9 @@
  *
  * Bare-metal AArch64, entered at EL1 with the MMU off on the `a13-test`
  * machine (one AppleA13 core, the CPU type t8030 uses). It:
- *   1. installs EL1 and guarded (VBAR_GL11, GXF_ABORT_EL1) vectors whose
- *      every entry reports FAIL with the ESR, so any UNDEF - a register the
- *      model does not define - fails the test closed;
+ *   1. installs EL1 and guarded (GXF_ABORT_EL1, and VBAR_GL11 once in GL1)
+ *      vectors whose every entry reports FAIL with the ESR, so any UNDEF - a
+ *      register the model does not define - fails the test closed;
  *   2. at EL1, MSR/MRS round-trips every placeholder register added for
  *      SPTM, and checks that the encodings SPTM uses which already have a
  *      real model (PAC keys, APCTL, VMSA lock, AMX, CTRR, error status) are
@@ -113,8 +113,6 @@ _start:
     CHECK_GUARDED 0
 
     /* --- SPTM-style bootstrap: enable GXF, install the GL1 entry, GENTER --- */
-    adr     x0, vectors
-    msr     s3_6_c15_c9_2, x0          /* VBAR_GL11 */
     adr     x0, guarded_abort
     msr     s3_6_c15_c8_2, x0          /* GXF_ABORT_EL1 */
     mov     x0, #1
@@ -137,6 +135,12 @@ guarded_done:
     b       1b
 
 gl1_entry:
+    /* VBAR_GL11 is only accessible while guarded (as in SPTM, which sets it
+     * right after its first GENTER); a fault before this line hangs and is
+     * caught by the runner's timeout */
+    adr     x0, vectors
+    msr     s3_6_c15_c9_2, x0          /* VBAR_GL11 */
+    isb
     CHECK_GUARDED 1
     /* the GXF-space registers again, from guarded mode */
     CHECK_RW 6, 15, 0, 0, 0xfeedfacefeedface

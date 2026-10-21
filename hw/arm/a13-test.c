@@ -39,6 +39,7 @@
 #include "qemu/osdep.h"
 #include "hw/arm/a13.h"
 #include "hw/boards.h"
+#include "hw/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
