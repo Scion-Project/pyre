@@ -311,6 +311,76 @@ static void get_kaslr_slides(AppleT8030MachineState* t8030, hwaddr* phys_slide_o
     *virt_slide_out = slide_virt;
 }
 
+// Map a standalone monitor Mach-O (TXM) into guest RAM at `phys_base`, laying
+// segments out relative to the image's lowest (text) vmaddr so the guest copy
+// is gap-free. Returns the entry-point PA taken from LC_UNIXTHREAD (0 if none).
+// This is deliberately separate from apple_boot_load_macho(), which performs
+// kernelcache-specific symbol/__TEXT fix-ups that do not apply to a PIE monitor
+// image (TXM's __TEXT is read-only data, not a nested Mach-O header).
+static hwaddr t8030_map_monitor(MachoHeader64* hdr, hwaddr phys_base)
+{
+    uint8_t*          buf = apple_boot_get_macho_buffer(hdr);
+    vaddr             text_base;
+    vaddr             kc_base;
+    MachoLoadCommand* cmd;
+    hwaddr            entry = 0;
+    uint32_t          i;
+
+    apple_boot_get_kc_bounds(hdr, &text_base, &kc_base, NULL, NULL, NULL);
+
+    cmd = (MachoLoadCommand*)(hdr + 1);
+    for (i = 0; i < hdr->n_cmds; i++, cmd = (MachoLoadCommand*)((char*)cmd + cmd->cmd_size)) {
+        if (cmd->cmd == LC_SEGMENT_64) {
+            MachoSegmentCommand64* seg = (MachoSegmentCommand64*)cmd;
+            if (strncmp(seg->segname, "__PAGEZERO", 10) == 0 || seg->vmsize == 0) { continue; }
+            // buf is indexed by the (32 MiB-rounded) kc_base used when the
+            // Mach-O was laid out; guest placement is relative to text_base.
+            address_space_rw(&address_space_memory, phys_base + (seg->vmaddr - text_base), MEMTXATTRS_UNSPECIFIED,
+                             buf + (seg->vmaddr - kc_base), seg->filesize, true);
+        }
+        else if (cmd->cmd == LC_UNIXTHREAD) {
+            // arm64 pc slot (matches apple_boot_load_macho).
+            uint64_t pc = *(uint64_t*)((char*)cmd + 0x110);
+            entry       = phys_base + (pc - text_base);
+        }
+    }
+
+    return entry;
+}
+
+// Lowest physical address >= `min_pa` that is congruent to `va` modulo
+// `modulus` (a power of two).
+static hwaddr t8030_congruent_pa(hwaddr min_pa, vaddr va, hwaddr modulus)
+{
+    hwaddr off = va & (modulus - 1);
+
+    return ROUND_UP(min_pa - off, modulus) + off;
+}
+
+static void t8030_report_layout(AppleBootInfo* info, hwaddr kernel_start, hwaddr kernel_end, bool sptm, bool txm)
+{
+    info_report("Boot layout (physical):");
+    info_report("  kernel         0x" HWADDR_FMT_plx " - 0x" HWADDR_FMT_plx, kernel_start, kernel_end);
+    if (sptm) {
+        info_report("  SPTM           0x" HWADDR_FMT_plx " - 0x" HWADDR_FMT_plx " entry 0x" HWADDR_FMT_plx
+                    " (virt_base 0x%016" VADDR_PRIx ")",
+                    info->sptm_phys_base, info->sptm_phys_base + info->sptm_size, info->sptm_entry,
+                    info->sptm_virt_base);
+        info_report("  SPTM handoff   0x" HWADDR_FMT_plx " - 0x" HWADDR_FMT_plx, info->sptm_handoff_addr,
+                    info->sptm_handoff_addr + SPTM_HANDOFF_SIZE);
+        info_report("  SPTM boot info 0x" HWADDR_FMT_plx " - 0x" HWADDR_FMT_plx, info->sptm_boot_args_addr,
+                    info->sptm_boot_args_addr + SPTM_BOOT_ARGS_SIZE);
+    }
+    if (txm) {
+        info_report("  TXM            0x" HWADDR_FMT_plx " - 0x" HWADDR_FMT_plx " entry 0x" HWADDR_FMT_plx,
+                    info->txm_phys_base, info->txm_phys_base + info->txm_size, info->txm_entry);
+    }
+    if (info->ramdisk_size != 0) {
+        info_report("  ramdisk        0x" HWADDR_FMT_plx " - 0x" HWADDR_FMT_plx, info->ramdisk_addr,
+                    info->ramdisk_addr + info->ramdisk_size);
+    }
+}
+
 static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cmdline, CarveoutAllocator* ca)
 {
     MachineState*  machine = MACHINE(t8030);
@@ -321,6 +391,7 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
     vaddr          apple_dt_va;
     hwaddr         mem_size;
     hwaddr         phys_ptr;
+    hwaddr         kernel_end;
     AppleBootInfo* info = &t8030->boot_info;
 
     apple_boot_get_kc_bounds(t8030->kernel, NULL, &kc_base, &kc_end, &ro_lower, &ro_upper);
@@ -348,34 +419,48 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
 
     phys_ptr = vtop_static(ROUND_UP_16K(kc_end + g_virt_slide));
 
-    // SPTM runs before the kernel. Keep its physical address congruent to its
-    // link address modulo 32 MiB (as the kernel slides do), since SPTM rounds
-    // phys_base up to 32 MiB and shifts virt_base by the same amount.
+    // Monitor images go right after the kernel, in boot order: SPTM, its
+    // handoff and boot-info pages, then TXM. The ramdisk follows.
+    //
+    // SPTM rounds phys_base up to 32 MiB and shifts virt_base by the same
+    // delta (like XNU's start.s), so its physical address must be congruent
+    // to its link address modulo 32 MiB, the property the kernel slides keep.
+    kernel_end = phys_ptr;
     if (t8030->sptm != NULL) {
-        vaddr  sptm_text;
-        vaddr  sptm_kc_base;
-        vaddr  sptm_kc_end;
-        hwaddr sptm_text_off;
+        vaddr sptm_text;
+        vaddr sptm_end;
 
-        apple_boot_get_kc_bounds(t8030->sptm, &sptm_text, &sptm_kc_base, &sptm_kc_end, NULL, NULL);
-        sptm_text_off = sptm_text - sptm_kc_base;
-
-        info->sptm_phys_base = ROUND_UP(phys_ptr - sptm_text_off, L2_GRANULE);
-        info->sptm_virt_base = sptm_kc_base - (info->sptm_phys_base - g_phys_base);
-        info->sptm_size      = sptm_kc_end - sptm_text;
-        info->sptm_entry =
-            apple_boot_load_macho(t8030->sptm, &address_space_memory, NULL, info->sptm_phys_base, 0);
-        phys_ptr = ROUND_UP_16K(info->sptm_phys_base + sptm_text_off + info->sptm_size);
+        apple_boot_get_kc_bounds(t8030->sptm, &sptm_text, NULL, &sptm_end, NULL, NULL);
+        info->sptm_size      = ROUND_UP_16K(sptm_end - sptm_text);
+        info->sptm_phys_base = t8030_congruent_pa(phys_ptr, sptm_text, L2_GRANULE);
+        info->sptm_virt_base = sptm_text - (info->sptm_phys_base - g_phys_base);
+        info->sptm_entry     = t8030_map_monitor(t8030->sptm, info->sptm_phys_base);
+        phys_ptr             = info->sptm_phys_base + info->sptm_size;
 
         info->sptm_handoff_addr    = phys_ptr;
         phys_ptr                  += SPTM_HANDOFF_SIZE;
         info->sptm_boot_args_addr  = phys_ptr;
         phys_ptr                  += SPTM_BOOT_ARGS_SIZE;
+    }
 
-        info_report("SPTM Physical Base: 0x" HWADDR_FMT_plx, info->sptm_phys_base + sptm_text_off);
-        info_report("SPTM Virtual Base: 0x%016" VADDR_PRIx, info->sptm_virt_base);
-        info_report("SPTM Entry Point: 0x" HWADDR_FMT_plx, info->sptm_entry);
-        info_report("SPTM Boot Args: 0x" HWADDR_FMT_plx, info->sptm_boot_args_addr);
+    // TXM (Trusted Execution Monitor) image. On iOS 27 code-signing / trust-cache
+    // / page-execute enforcement lives in TXM, so the boot chain must map it. The
+    // physical layout here shares the `phys_ptr` bump-allocator with the kernel,
+    // ramdisk, TZ0 and SEPFW; the SPTM image (owned by the SPTM boot work) is
+    // placed adjacently. See docs/ios27 for the VA map (TXM base 0x…17004000,
+    // span 0x8c000) and the SPTM/TXM boot-chain spec.
+    if (t8030->txm != NULL) {
+        vaddr txm_base;
+        vaddr txm_end;
+
+        apple_boot_get_kc_bounds(t8030->txm, &txm_base, NULL, &txm_end, NULL, NULL);
+        info->txm_size      = ROUND_UP_16K(txm_end - txm_base);
+        info->txm_phys_base = phys_ptr;
+        info->txm_entry     = t8030_map_monitor(t8030->txm, info->txm_phys_base);
+        phys_ptr           += info->txm_size;
+        info_report("TXM Physical Base: 0x" HWADDR_FMT_plx, info->txm_phys_base);
+        info_report("TXM Entry: 0x" HWADDR_FMT_plx, info->txm_entry);
+        info_report("TXM Size: 0x" HWADDR_FMT_plx, info->txm_size);
     }
 
     // RAM Disk
@@ -386,6 +471,8 @@ static void t8030_load_kernelcache(AppleT8030MachineState* t8030, const char* cm
         info->ramdisk_size  = ROUND_UP_16K(info->ramdisk_size);
         phys_ptr           += info->ramdisk_size;
     }
+
+    t8030_report_layout(info, vtop_slid(ro_lower), kernel_end, t8030->sptm != NULL, t8030->txm != NULL);
 
     // TZ0
     // 256 MiB doesn't seem to work properly with sepos 18.5
@@ -2603,6 +2690,18 @@ static void t8030_init(MachineState* machine)
                 BUILD_VERSION_MINOR(build_version), BUILD_VERSION_PATCH(build_version));
     t8030->build_version = build_version;
 
+    // Load and parse the TXM image if provided (`-M t8030,txm=<txm.im4p>`). The
+    // guest mapping happens later in t8030_load_kernelcache(); doing the host
+    // parse here keeps it independent of, and observable before, the SPTM gate.
+    if (t8030->txm_filename != NULL) {
+        t8030->txm = apple_boot_load_monitor(t8030->txm_filename, "trxm");
+        if (t8030->txm == NULL) {
+            error_setg(&error_fatal, "Failed to load TXM from `%s`", t8030->txm_filename);
+            return;
+        }
+        info_report("TXM: loaded `%s`", t8030->txm_filename);
+    }
+
     if (t8030_kernel_uses_sptm(t8030->kernel)) {
         if (t8030->sptm_filename == NULL) {
             error_setg(&error_fatal,
@@ -2610,7 +2709,7 @@ static void t8030_init(MachineState* machine)
                        "(upstream: ChefKissInc/Inferno#268)");
             return;
         }
-        t8030->sptm = apple_boot_load_sptm(t8030->sptm_filename);
+        t8030->sptm = apple_boot_load_monitor(t8030->sptm_filename, "sptm");
         if (t8030->sptm == NULL) {
             error_setg(&error_fatal, "Failed to load SPTM");
             return;
@@ -2833,6 +2932,7 @@ PROP_VISIT_GETTER_SETTER(uint64, ecid);
 PROP_GETTER_SETTER(bool, kaslr_off);
 PROP_GETTER_SETTER(bool, force_dfu);
 PROP_STR_GETTER_SETTER(trustcache_filename);
+PROP_STR_GETTER_SETTER(txm_filename);
 PROP_STR_GETTER_SETTER(sep_rom_filename);
 PROP_STR_GETTER_SETTER(sep_fw_filename);
 PROP_STR_GETTER_SETTER(securerom_filename);
@@ -2867,6 +2967,8 @@ static void t8030_class_init(ObjectClass* klass, const void* data)
 
     object_class_property_add_str(klass, "trustcache", t8030_get_trustcache_filename, t8030_set_trustcache_filename);
     object_class_property_set_description(klass, "trustcache", "TrustCache");
+    object_class_property_add_str(klass, "txm", t8030_get_txm_filename, t8030_set_txm_filename);
+    object_class_property_set_description(klass, "txm", "Trusted Execution Monitor (TXM) IM4P");
     object_class_property_add_str(klass, "sep-rom", t8030_get_sep_rom_filename, t8030_set_sep_rom_filename);
     object_class_property_set_description(klass, "sep-rom", "SEP ROM");
     object_class_property_add_str(klass, "sep-fw", t8030_get_sep_fw_filename, t8030_set_sep_fw_filename);
