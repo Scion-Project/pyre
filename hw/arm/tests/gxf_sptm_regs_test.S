@@ -8,7 +8,10 @@
  *   1. installs EL1 and guarded (VBAR_GL11, GXF_ABORT_EL1) vectors whose
  *      every entry reports FAIL with the ESR, so any UNDEF - a register the
  *      model does not define - fails the test closed;
- *   2. MSR/MRS round-trips every register added for SPTM, at EL1;
+ *   2. at EL1, MSR/MRS round-trips every placeholder register added for
+ *      SPTM, and checks that the encodings SPTM uses which already have a
+ *      real model (PAC keys, APCTL, VMSA lock, AMX, error status) are
+ *      accessible, writing back the value read so their state is unchanged;
  *   3. reproduces SPTM's bootstrap prologue in miniature: GXF_CONFIG_EL1 = 1,
  *      GXF_ENTER_EL1 = handler, GENTER; checks GXF_STATUS_EL1 says guarded,
  *      round-trips the GXF-space registers from GL1, then GEXITs and checks
@@ -49,6 +52,21 @@
         b.ne    mismatch
     .endm
 
+/* read, then write the same value back: the register must exist and be
+ * writable, without the test changing its state */
+    .macro CHECK_WB op1, crn, crm, op2
+        add     x19, x19, #1
+        mrs     x0, s3_\op1\()_c\crn\()_c\crm\()_\op2
+        msr     s3_\op1\()_c\crn\()_c\crm\()_\op2, x0
+        isb
+    .endm
+
+/* read only: the register must exist */
+    .macro CHECK_RD op1, crn, crm, op2
+        add     x19, x19, #1
+        mrs     x0, s3_\op1\()_c\crn\()_c\crm\()_\op2
+    .endm
+
 /* expect (GXF_STATUS_EL1 & 1) == \want */
     .macro CHECK_GUARDED want
         add     x19, x19, #1
@@ -66,26 +84,27 @@ _start:
     msr     vbar_el1, x0
     isb
 
-    /* --- EL1, non-guarded: every register added for SPTM --- */
+    /* --- EL1, non-guarded: every encoding SPTM / the iOS 27 kernel use --- */
+    /* placeholders (storage only, added for SPTM): full round trip */
     CHECK_RW 6, 15, 0, 0, 0x0123456789abcdef
-    CHECK_RW 6, 15, 2, 0, 0x1122334455667788
     CHECK_RW 6, 15, 8, 7, 0x8877665544332211
-
     CHECK_RW 4, 15, 0, 0, 0xa5a5a5a5a5a5a5a5
     CHECK_RW 4, 15, 0, 1, 0x5a5a5a5a5a5a5a5a
-    CHECK_RW 4, 15, 0, 2, 0x00000000ffffffff
     CHECK_RW 4, 15, 0, 3, 0xffffffff00000000
-    CHECK_RW 4, 15, 0, 4, 0xdeadbeefcafebabe
-    CHECK_RW 4, 15, 0, 5, 0x0f0f0f0f0f0f0f0f
-    CHECK_RW 4, 15, 1, 0, 0x1111111122222222
-    CHECK_RW 4, 15, 1, 1, 0x3333333344444444
-    CHECK_RW 4, 15, 1, 2, 0x5555555566666666
-    CHECK_RW 4, 15, 1, 3, 0x7777777788888888
-    CHECK_RW 4, 15, 1, 4, 0x9999999900000000
     CHECK_RW 4, 15, 2, 2, 0xaaaaaaaabbbbbbbb
     CHECK_RW 4, 15, 2, 3, 0xccccccccdddddddd
     CHECK_RW 4, 15, 2, 4, 0xeeeeeeeeffffffff
     CHECK_RW 4, 15, 2, 5, 0x0123deadbeef4567
+    /* already modelled elsewhere: must be accessible, state left as is */
+    CHECK_WB 6, 15, 2, 0                       /* ARM64_REG_MMU_ERR_STS */
+    CHECK_WB 4, 15, 0, 2                       /* ARM64_REG_FED_ERR_STS */
+    CHECK_WB 4, 15, 0, 4                       /* APCTL_EL1 */
+    CHECK_WB 4, 15, 0, 5                       /* A13 S3_4_c15_c0_5 */
+    CHECK_WB 4, 15, 1, 0                       /* KERNELKEYLO_EL1 */
+    CHECK_WB 4, 15, 1, 1                       /* KERNELKEYHI_EL1 */
+    CHECK_WB 4, 15, 1, 2                       /* VMSA_LOCK_EL1 */
+    CHECK_RD 4, 15, 1, 3                       /* AMX_STATUS_EL1 (read-only) */
+    CHECK_WB 4, 15, 1, 4                       /* AMX_CTL_EL1 */
 
 #ifdef NEGATIVE_CONTROL
     CHECK_RW 6, 15, 14, 7, 0x1                 /* undefined: must UNDEF */
@@ -121,8 +140,8 @@ gl1_entry:
     CHECK_GUARDED 1
     /* the GXF-space registers again, from guarded mode */
     CHECK_RW 6, 15, 0, 0, 0xfeedfacefeedface
-    CHECK_RW 6, 15, 2, 0, 0x2468135724681357
     CHECK_RW 6, 15, 8, 7, 0x1357246813572468
+    CHECK_WB 6, 15, 2, 0
     adr     x0, guarded_done
     msr     s3_6_c15_c9_6, x0          /* ELR_GL11 = guarded_done */
     isb

@@ -620,6 +620,7 @@ static void sptm_impdef_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t
         .crm         = (crm_),                                                                       \
         .opc2        = (op2_),                                                                       \
         .access      = PL1_RW,                                                                       \
+        .type        = ARM_CP_OVERRIDE,                                                              \
         .resetvalue  = 0,                                                                            \
         .readfn      = sptm_impdef_read,                                                             \
         .writefn     = sptm_impdef_write,                                                            \
@@ -663,10 +664,35 @@ void apple_a13_init_gxf_override(AppleA13State* cpu)
     }
 }
 
+/*
+ * Several encodings in apple_a13_sptm_cp_reginfo already have a real model:
+ * - in the A13 core table, defined just before this:
+ *   S3_6_C15_C2_0 ARM64_REG_MMU_ERR_STS, S3_4_C15_C0_2 ARM64_REG_FED_ERR_STS,
+ *   S3_4_C15_C0_5, S3_4_C15_C1_3 AMX_STATUS_EL1 (read-only),
+ *   S3_4_C15_C1_4 AMX_CTL_EL1;
+ * - in target/arm/helper.c, defined later during the ARM CPU realize:
+ *   S3_4_C15_C0_4 APCTL_EL1, S3_4_C15_C1_0/C1_1 KERNELKEYLO/HI_EL1,
+ *   S3_4_C15_C1_2 VMSA_LOCK_EL1.
+ * The placeholders are marked ARM_CP_OVERRIDE so the later real definitions
+ * replace them (redefining a non-override register asserts in
+ * add_cpreg_to_hashtable() on assert-enabled builds, which aborted every
+ * AppleA13 realize there), and they are skipped where an earlier definition
+ * exists, so the A13 registers keep exactly their previous semantics.
+ */
+static void apple_a13_define_sptm_regs(ARMCPU* cpu)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(apple_a13_sptm_cp_reginfo); ++i) {
+        const ARMCPRegInfo* r   = &apple_a13_sptm_cp_reginfo[i];
+        uint32_t            key = ENCODE_AA64_CP_REG(r->cp, r->crn, r->crm, r->opc0, r->opc1, r->opc2);
+
+        if (ARMCPRegTable_cget(cpu->cp_regs, key) == NULL) { define_one_arm_cp_reg(cpu, r); }
+    }
+}
+
 void apple_a13_init_gxf(AppleA13State* cpu)
 {
     if (arm_feature(&cpu->parent_obj.env, ARM_FEATURE_GXF)) {
         define_arm_cp_regs(&cpu->parent_obj, apple_a13_gxf_cp_reginfo);
-        define_arm_cp_regs(&cpu->parent_obj, apple_a13_sptm_cp_reginfo);
+        apple_a13_define_sptm_regs(&cpu->parent_obj);
     }
 }
