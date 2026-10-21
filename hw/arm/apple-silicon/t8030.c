@@ -2833,7 +2833,12 @@ static void t8030_init(MachineState *machine)
         t8030->sio_protocol = 10;
         break;
     default:
-        assert_not_reached();
+        // assert_not_reached() is undefined behaviour in release builds.
+        error_setg(&error_fatal, "Unsupported iOS kernel version %u.%u.%u",
+                   BUILD_VERSION_MAJOR(build_version),
+                   BUILD_VERSION_MINOR(build_version),
+                   BUILD_VERSION_PATCH(build_version));
+        return;
     }
 
     if (t8030->securerom_filename == NULL) {

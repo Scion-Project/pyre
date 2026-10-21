@@ -38,8 +38,6 @@
 
 #ifdef CONFIG_PNG
 #include <png.h>
-#else
-#error "PNG support is required"
 #endif
 
 #if 0
@@ -735,7 +733,30 @@ static void adp_v4_draw_boot_splash_timer(void *opaque)
     g_free(ctx);
 }
 
-// Please see `ui/icons/CKBrandingNotice.md`
+static void adp_v4_clear_display(AppleDisplayPipeV4State *adp)
+{
+    pixman_rectangle16_t rect = {
+        .width = qemu_console_get_width(adp->console, 0),
+        .height = qemu_console_get_height(adp->console, 0),
+    };
+    pixman_color_t color = QEMU_PIXMAN_COLOR_BLACK;
+
+    pixman_image_fill_rectangles(PIXMAN_OP_SRC,
+                                 qemu_console_surface(adp->console)->image,
+                                 &color, 1, &rect);
+    dpy_gfx_update_full(adp->console);
+}
+
+#ifndef CONFIG_PNG
+static void adp_v4_read_and_draw_boot_splash(AppleDisplayPipeV4State *adp)
+{
+    adp_v4_clear_display(adp);
+}
+#else
+/*
+ * Please see `ui/icons/CKBrandingNotice.md`. Derivative builds must not ship
+ * the splash artwork, so a missing file just leaves the display black.
+ */
 static void adp_v4_read_and_draw_boot_splash(AppleDisplayPipeV4State *adp)
 {
     char *path;
@@ -754,7 +775,8 @@ static void adp_v4_read_and_draw_boot_splash(AppleDisplayPipeV4State *adp)
     assert_nonnull(path);
     fp = fopen(path, "rb");
     if (fp == NULL) {
-        error_setg(&error_abort, "Missing emulator branding: %s.", path);
+        g_free(path);
+        adp_v4_clear_display(adp);
         return;
     }
     fread(sig, sizeof(sig), 1, fp);
@@ -830,6 +852,7 @@ static void adp_v4_read_and_draw_boot_splash(AppleDisplayPipeV4State *adp)
     timer_mod(adp->boot_splash_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                                           (NANOSECONDS_PER_SECOND / 2));
 }
+#endif
 
 static void adp_v4_reset_hold(Object *obj, ResetType type)
 {

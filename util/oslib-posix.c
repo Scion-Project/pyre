@@ -982,6 +982,21 @@ int qemu_shm_alloc(size_t size, Error **errp)
 
     cur_sequence = qatomic_fetch_inc(&sequence);
 
+#ifdef __ANDROID__
+    /*
+     * Bionic has no POSIX shared memory; a memfd is the same thing: an
+     * anonymous object that lives as long as its file descriptors do.
+     */
+    (void)shm_name;
+    (void)oflag;
+    (void)mode;
+    (void)cur_sequence;
+    fd = memfd_create("qemu-shm", MFD_CLOEXEC);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "failed to create memfd");
+        return -1;
+    }
+#else
     /*
      * Let's use `mode = 0` because we don't want other processes to open our
      * memory unless we share the file descriptor with them.
@@ -1014,6 +1029,7 @@ int qemu_shm_alloc(size_t size, Error **errp)
      * there are file descriptors pointing to it.
      */
     shm_unlink(shm_name->str);
+#endif
 
     if (ftruncate(fd, size) == -1) {
         error_setg_errno(errp, errno,
