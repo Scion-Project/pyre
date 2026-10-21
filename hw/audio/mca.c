@@ -19,18 +19,14 @@
 
 #include "qemu/osdep.h"
 #include "audio/audio.h"
+#include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "hw/audio/mca.h"
+#include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/fifo32.h"
 #include "qemu/timer.h"
-
-#if 0
-    #define MCA_DPRINTF(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
-#else
-    #define MCA_DPRINTF(fmt, ...) \
-        do { }                    \
-        while (0)
-#endif
+#include "trace.h"
 
 // MMIO Index 0: SmartIO MCA
 #define MCA_SIO_REG_STRIDE (0x4000)
@@ -177,6 +173,12 @@ struct AppleMCAState
     uint32_t             ring_used;
 };
 
+static void apple_mca_realize(DeviceState* dev, Error** errp);
+
+static const Property apple_mca_properties[] = {
+    DEFINE_AUDIO_PROPERTIES(AppleMCAState, card),
+};
+
 static void apple_mca_class_init(ObjectClass* klass, const void* data)
 {
     DeviceClass* dc;
@@ -185,7 +187,8 @@ static void apple_mca_class_init(ObjectClass* klass, const void* data)
 
     dc->desc           = "Apple Multi-Channel Audio";
     dc->user_creatable = false;
-    // dc->realize = apple_mca_realize;
+    dc->realize        = apple_mca_realize;
+    device_class_set_props(dc, apple_mca_properties);
     set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
 }
 
@@ -194,6 +197,7 @@ OBJECT_DEFINE_SIMPLE_TYPE_CLASS_INIT(AppleMCAState, apple_mca, APPLE_MCA, SYS_BU
 static uint32_t apple_mca_dma_into_ring(AppleMCAState* s, uint32_t want)
 {
     uint32_t done = 0;
+    uint32_t real = 0;
 
     if (want > (MCA_RING_SIZE - s->ring_used)) {
         uint32_t drop  = want - (MCA_RING_SIZE - s->ring_used);
@@ -213,11 +217,13 @@ static uint32_t apple_mca_dma_into_ring(AppleMCAState* s, uint32_t want)
 
         got = apple_sio_dma_read(s->tx_ep, s->ring + tail, run);
         if (got < run) { memset(s->ring + tail + got, 0, run - got); }
+        real += got;
 
         s->ring_used += run;
         done         += run;
     }
 
+    trace_apple_mca_pull(want, real);
     return done;
 }
 
@@ -260,6 +266,7 @@ static void apple_mca_set_running(AppleMCAState* s, bool running)
     if (running == s->running) { return; }
 
     s->running = running;
+    trace_apple_mca_running(running);
 
     AUD_set_active_out(s->voice, running);
     AUD_set_volume_out(s->voice, !running, 255, 255);
@@ -282,7 +289,7 @@ static void apple_mca_sio_reg_write(void* opaque, hwaddr addr, uint64_t data, un
     index = addr / MCA_SIO_REG_STRIDE;
     off   = addr % MCA_SIO_REG_STRIDE;
 
-    MCA_DPRINTF("sio_cluster_%lld: 0x%llX <- 0x%llX\n", index, off, data);
+    trace_apple_mca_sio_write(index, off, data);
 
     switch (off) {
         case RXB_REG_BASE + REG_RX_CFG: s->sio_clusters[index].rxb_config = data; break;
@@ -311,7 +318,7 @@ static uint64_t apple_mca_sio_reg_read(void* const opaque, const hwaddr addr, co
         case TXB_REG_BASE + REG_SIO_UNIT_CTL: ret = s->sio_clusters[index].txb_control; break;
     }
 
-    MCA_DPRINTF("sio_cluster_%lld: 0x%llX -> 0x%llX\n", index, off, ret);
+    trace_apple_mca_sio_read(index, off, ret);
     return ret;
 }
 
@@ -335,10 +342,12 @@ static void apple_mca_dma_reg_write(void* opaque, hwaddr addr, uint64_t data, un
     index = addr / MCA_DMA_REG_STRIDE;
     off   = addr % MCA_DMA_REG_STRIDE;
 
-    MCA_DPRINTF("dma_cluster_%lld: 0x%llX <- 0x%llX\n", index, off, data);
 
     switch (off) {
-        case REG_MCA_DMA_CFG       : s->dma_clusters[index].config = data; break;
+        case REG_MCA_DMA_CFG:
+            trace_apple_mca_dma_cfg(index, data);
+            s->dma_clusters[index].config = data;
+            break;
         case REG_MCA_DMA_FIFO_INOUT: fifo32_push(&s->dma_clusters[index].fifo, data); break;
         default                    : break;
     }
@@ -367,7 +376,6 @@ static uint64_t apple_mca_dma_reg_read(void* const opaque, const hwaddr addr, co
             break;
         default: ret = 0; break;
     }
-    MCA_DPRINTF("dma_cluster_%lld: 0x%llX -> 0x%llX\n", index, off, ret);
     return ret;
 }
 
@@ -391,7 +399,7 @@ static void apple_mca_mclk_reg_write(void* opaque, hwaddr addr, uint64_t data, u
     index = addr / MCLK_CFG_REG_STRIDE;
     off   = addr % MCLK_CFG_REG_STRIDE;
 
-    MCA_DPRINTF("mclk_cluster_%lld: 0x%llX <- 0x%llX\n", index, off, data);
+    trace_apple_mca_mclk_write(index, data);
 
     switch (off) {
         case REG_MCLK_CFG: s->mclk_clusters[index] = (uint32_t)data; break;
@@ -413,7 +421,6 @@ static uint64_t apple_mca_mclk_reg_read(void* const opaque, const hwaddr addr, c
         case REG_MCLK_CFG: ret = s->mclk_clusters[index]; break;
         default          : ret = 0; break;
     }
-    MCA_DPRINTF("mclk_cluster_%lld: 0x%llX -> 0x%llX\n", index, off, ret);
     return ret;
 }
 
@@ -487,18 +494,24 @@ SysBusDevice* apple_mca_create(AppleDTNode* node, AppleSIODMAEndpoint* tx_ep, Ap
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_mca_serialise, s);
 
-    if (AUD_register_card("mca", &s->card, NULL)) {
-        audsettings settings = {0};
-        settings.fmt         = AUDIO_FORMAT_S16;
-        settings.freq        = 48000;
-        settings.nchannels   = 2;
-        settings.endianness  = 0;    // LE
-        s->voice             = AUD_open_out(&s->card, s->voice, "mca.out", s, apple_mca_out_callback, &settings);
-        if (s->voice == NULL) { error_report("Failed to create voice for Multi-Channel Audio"); }
-    }
-    else {
-        error_report("Failed to create QEMU sound card for Multi-Channel Audio");
-    }
-
     return sbd;
+}
+
+static void apple_mca_realize(DeviceState* dev, Error** errp)
+{
+    AppleMCAState* s = APPLE_MCA(dev);
+    audsettings    settings = {0};
+
+    // Without audiodev= this uses the default backend (none if QEMU has no driver for the host).
+    if (!AUD_register_card("mca", &s->card, errp)) { return; }
+
+    settings.fmt        = AUDIO_FORMAT_S16;
+    settings.freq       = MCA_FRAME_RATE;
+    settings.nchannels  = MCA_CHANNELS;
+    settings.endianness = 0;    // LE
+    s->voice            = AUD_open_out(&s->card, s->voice, "mca.out", s, apple_mca_out_callback, &settings);
+    if (s->voice == NULL) {
+        error_setg(errp, "Failed to open the Multi-Channel Audio output voice");
+        AUD_remove_card(&s->card);
+    }
 }

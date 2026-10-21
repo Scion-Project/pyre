@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "hw/audio/cs35l27.h"
 #include "hw/i2c/i2c.h"
+#include "trace.h"
 
 #if 0
     #define DPRINTF(v, ...) fprintf(stderr, v, ##__VA_ARGS__)
@@ -86,7 +87,7 @@ static uint8_t apple_cs35l27_rx(I2CSlave* i2c)
             break;
     }
 
-    DPRINTF("%s: addr=0x%X, ret=0x%X\n", __func__, s->addr, ret);
+    trace_apple_cs35l27_read(s->addr, ret);
 
     s->addr += 1;
     if (s->addr == 4) {
@@ -114,7 +115,7 @@ static int apple_cs35l27_tx(I2CSlave* i2c, uint8_t data)
         s->tx_bytes += 1;
     }
     else if (s->tx_bytes < 0x40) {
-        DPRINTF("%s: addr=0x%X,data=0x%02X\n", __func__, s->addr, data);
+        trace_apple_cs35l27_write(s->addr, data);
         if (s->addr < 0x1000000) { s->regs[s->addr] = data; }
         s->addr     += 1;
         s->tx_bytes += 1;

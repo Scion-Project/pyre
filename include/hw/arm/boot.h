@@ -376,6 +376,8 @@ typedef struct
     bool          non_cold_boot;
     bool          had_autoboot;
     bool          keep_gpu; // keep the GPU's device-tree nodes (t8030 gpu=on)
+    // Keep the audio nodes (MCA, codec, amps) in the device tree.
+    bool          audio;
     AppleBootMode boot_mode;
 } AppleBootInfo;
 

@@ -1,0 +1,16 @@
+# See docs/devel/tracing.rst for the syntax documentation.
+
+# mca.c
+apple_mca_sio_write(uint64_t cluster, uint64_t off, uint64_t val) "cluster %" PRIu64 " 0x%03" PRIx64 " <- 0x%" PRIx64
+apple_mca_sio_read(uint64_t cluster, uint64_t off, uint64_t val) "cluster %" PRIu64 " 0x%03" PRIx64 " -> 0x%" PRIx64
+apple_mca_dma_cfg(uint64_t index, uint64_t val) "dma %" PRIu64 " cfg <- 0x%" PRIx64
+apple_mca_mclk_write(uint64_t index, uint64_t val) "mclk %" PRIu64 " <- 0x%" PRIx64
+apple_mca_running(int running) "speaker TX %d"
+apple_mca_pull(uint32_t want, uint32_t got) "want %u got %u bytes from DMA"
+
+# cs35l27.c
+apple_cs35l27_write(uint32_t addr, uint8_t val) "0x%06x <- 0x%02x"
+apple_cs35l27_read(uint32_t addr, uint8_t val) "0x%06x -> 0x%02x"
+
+# cs42l77.c
+apple_cs42l77_cmd(uint8_t cmd, uint64_t addr, uint16_t len) "cmd 0x%02x addr 0x%" PRIx64 " len %u"

@@ -23,6 +23,7 @@
 #include "hw/ssi/ssi.h"
 #include "qemu/bswap.h"
 #include "qemu/lockable.h"
+#include "trace.h"
 
 #if 0
     #define DPRINTF(v, ...) fprintf(stderr, v, ##__VA_ARGS__)
@@ -227,6 +228,7 @@ static uint32_t apple_cs42l77_transfer(SSIPeripheral* dev, uint32_t val)
     }
 
     if (s->pos == s->end_pos) {
+        trace_apple_cs42l77_cmd(s->cur_cmd, s->start_addr, s->length);
         DPRINTF("%s: cmd 0x%X end at 0x%X, start_addr=0x%llX, address=0x%llX, "
                 "len=0x%X\n",
                 __func__, s->cur_cmd, s->pos, s->start_addr, s->address, s->length);
