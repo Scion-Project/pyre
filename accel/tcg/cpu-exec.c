@@ -28,6 +28,7 @@
 #include "exec/cpu-interrupt.h"
 #include "exec/page-protection.h"
 #include "exec/translation-block.h"
+#include "exec/cputlb.h"
 #include "tcg/tcg.h"
 #include "qemu/atomic.h"
 #include "qemu/rcu.h"
@@ -96,6 +97,23 @@ static TranslationBlock* tb_htable_lookup(CPUState* cpu, TCGTBCPUState s)
     return qht_lookup_custom(&tb_ctx.htable, &desc, h, tb_lookup_cmp);
 }
 
+/*
+ * Fill a jump cache entry. Called on @cpu's own thread right after @tb was
+ * found or translated for @pc, so the TLB still holds the code mapping used.
+ * A TB spanning two pages is always treated as ASID-tagged.
+ */
+static inline void tb_jmp_cache_set(CPUState* cpu, uint32_t hash, vaddr pc, TranslationBlock* tb)
+{
+    CPUJumpCache* jc = cpu->tb_jmp_cache;
+
+    if (tb_page_addr1(tb) == -1 && tlb_code_page_is_global(cpu, pc)) { clear_bit(hash, jc->asid_tagged); }
+    else {
+        set_bit(hash, jc->asid_tagged);
+    }
+    jc->array[hash].pc = pc;
+    qatomic_set(&jc->array[hash].tb, tb);
+}
+
 /**
  * tb_lookup:
  * @cpu: CPU that will execute the returned translation block
@@ -132,8 +150,7 @@ static inline TranslationBlock* tb_lookup(CPUState* cpu, TCGTBCPUState s)
     tb = tb_htable_lookup(cpu, s);
     if (tb == NULL) { return NULL; }
 
-    jc->array[hash].pc = s.pc;
-    qatomic_set(&jc->array[hash].tb, tb);
+    tb_jmp_cache_set(cpu, hash, s.pc, tb);
 
 hit:
     /*
@@ -697,19 +714,13 @@ static int __attribute__((noinline)) cpu_exec_loop(CPUState* cpu)
 
             tb = tb_lookup(cpu, s);
             if (tb == NULL) {
-                CPUJumpCache* jc;
-                uint32_t      h;
-
                 tb = tb_gen_code(cpu, s);
 
                 /*
                  * We add the TB in the virtual pc hash table
                  * for the fast lookup
                  */
-                h               = tb_jmp_cache_hash_func(s.pc);
-                jc              = cpu->tb_jmp_cache;
-                jc->array[h].pc = s.pc;
-                qatomic_set(&jc->array[h].tb, tb);
+                tb_jmp_cache_set(cpu, tb_jmp_cache_hash_func(s.pc), s.pc, tb);
             }
 
             /*

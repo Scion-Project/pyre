@@ -123,15 +123,48 @@ static void tlb_window_reset(CPUTLBDesc* desc, int64_t ns, size_t max_entries)
     desc->window_max_entries = max_entries;
 }
 
-static void tb_jmp_cache_clear_page(CPUState* cpu, vaddr page_addr)
+/*
+ * Drop the jump cache entries for TBs that start in the page at @page_addr,
+ * comparing the low @bits of the address. Other pages that share the group
+ * keep their entries: their mappings are not affected by this flush.
+ */
+static void tb_jmp_cache_clear_page(CPUState* cpu, vaddr page_addr, unsigned bits)
 {
-    CPUJumpCache* jc = cpu->tb_jmp_cache;
+    CPUJumpCache* jc   = cpu->tb_jmp_cache;
+    vaddr         mask = TARGET_PAGE_MASK & (bits < 64 ? MAKE_64BIT_MASK(0, bits) : -1);
     int           i, i0;
 
     if (unlikely(!jc)) { return; }
 
     i0 = tb_jmp_cache_hash_page(page_addr);
-    for (i = 0; i < TB_JMP_PAGE_SIZE; i++) { qatomic_set(&jc->array[i0 + i].tb, NULL); }
+    for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
+        if (((jc->array[i0 + i].pc ^ page_addr) & mask) == 0) { qatomic_set(&jc->array[i0 + i].tb, NULL); }
+    }
+}
+
+/*
+ * Drop the jump cache entries that may have been reached through an
+ * ASID-tagged mapping (see CPUJumpCache.asid_tagged). The others came from
+ * global mappings whose TLB entries an ASID-only flush keeps, so the same
+ * lookup would find the same TB again.
+ */
+static void tb_jmp_cache_clear_asid_tagged(CPUState* cpu)
+{
+    CPUJumpCache* jc = cpu->tb_jmp_cache;
+
+    if (unlikely(!jc)) { return; }
+
+    for (size_t w = 0; w < ARRAY_SIZE(jc->asid_tagged); w++) {
+        unsigned long bits = jc->asid_tagged[w];
+
+        jc->asid_tagged[w] = 0;
+        while (bits) {
+            int i = ctzl(bits);
+
+            bits &= bits - 1;
+            qatomic_set(&jc->array[w * BITS_PER_LONG + i].tb, NULL);
+        }
+    }
 }
 
 /**
@@ -504,7 +537,7 @@ void tlb_flush_asid_tagged_by_mmuidx(CPUState* cpu, MMUIdxMap idxmap)
 
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
-    if (todo != 0) { tcg_flush_jmp_cache(cpu); }
+    if (todo != 0) { tb_jmp_cache_clear_asid_tagged(cpu); }
 }
 
 static void tlb_flush_page_locked(CPUState* cpu, int midx, vaddr page)
@@ -550,8 +583,8 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState* cpu, vaddr addr, MMUIdxMa
      * Discard jump cache entries for any tb which might potentially
      * overlap the flushed page, which includes the previous.
      */
-    tb_jmp_cache_clear_page(cpu, addr - TARGET_PAGE_SIZE);
-    tb_jmp_cache_clear_page(cpu, addr);
+    tb_jmp_cache_clear_page(cpu, addr - TARGET_PAGE_SIZE, 64);
+    tb_jmp_cache_clear_page(cpu, addr, 64);
 }
 
 /**
@@ -733,10 +766,11 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState* cpu, TLBFlushRangeData d
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
     /*
-     * If the length is larger than the jump cache size, then it will take
-     * longer to clear each entry individually than it will to clear it all.
+     * Each page clears one group of TB_JMP_PAGE_SIZE entries. Once the range
+     * covers as many pages as there are groups, clearing everything is cheaper
+     * (and clears a superset).
      */
-    if (d.len >= (TARGET_PAGE_SIZE * TB_JMP_CACHE_SIZE)) {
+    if (d.len >= TARGET_PAGE_SIZE * (TB_JMP_CACHE_SIZE / TB_JMP_PAGE_SIZE)) {
         tcg_flush_jmp_cache(cpu);
         return;
     }
@@ -747,7 +781,7 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState* cpu, TLBFlushRangeData d
      */
     d.addr -= TARGET_PAGE_SIZE;
     for (vaddr i = 0, n = d.len / TARGET_PAGE_SIZE + 1; i < n; i++) {
-        tb_jmp_cache_clear_page(cpu, d.addr);
+        tb_jmp_cache_clear_page(cpu, d.addr, d.bits);
         d.addr += TARGET_PAGE_SIZE;
     }
 }
@@ -1511,6 +1545,15 @@ void* tlb_vaddr_to_host(CPUArchState* env, vaddr addr, MMUAccessType access_type
 
     /* No combination of flags are expected by the caller. */
     return flags ? NULL : host;
+}
+
+bool tlb_code_page_is_global(CPUState* cpu, vaddr addr)
+{
+    int          mmu_idx = cpu_mmu_index(cpu, true);
+    uintptr_t    index   = tlb_index(cpu, mmu_idx, addr);
+    CPUTLBEntry* entry   = tlb_entry(cpu, mmu_idx, addr);
+
+    return tlb_hit(tlb_read_idx(entry, MMU_INST_FETCH), addr) && !cpu->neg.tlb.d[mmu_idx].fulltlb[index].asid_tagged;
 }
 
 /*
