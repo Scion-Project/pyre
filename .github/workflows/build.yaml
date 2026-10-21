@@ -33,6 +33,10 @@ jobs:
         run: |
           meson setup build .
           meson compile -C build
+      - name: Bare-metal CPU-model tests (a13-test machine)
+        run: |
+          command -v clang >/dev/null || sudo apt-get install -y clang
+          python3 hw/arm/tests/run-a13-tests.py build/qemu-system-aarch64
 
   build_macos:
     name: macOS Build
@@ -55,3 +59,5 @@ jobs:
         run: |
           LIBTOOL="glibtool" meson setup build . -Dsdl=disabled -Dgtk=disabled -Dcocoa=enabled -Dc_args="-DNCURSES_WIDECHAR=1"
           meson compile -C build
+      - name: Bare-metal CPU-model tests (a13-test machine)
+        run: python3 hw/arm/tests/run-a13-tests.py build/qemu-system-aarch64
