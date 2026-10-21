@@ -3005,6 +3005,10 @@ endif
 
 traceable = []
 emulators = {}
+shared_main_ver = files('system/shared-main.ver')[0]
+if get_option('system_shared_lib') and not get_option('b_staticpic')
+  error('system_shared_lib links the static libraries into a shared object; also pass -Db_staticpic=true')
+endif
 foreach target : target_dirs
   config_target = config_target_mak[target]
   target_name = config_target['TARGET_NAME']
@@ -3152,6 +3156,20 @@ foreach target : target_dirs
                                install_input)
     else
       emulators += {exe['name']: emulator}
+    endif
+
+    # The same emulator as a shared library, for hosts that load QEMU into
+    # their own process instead of exec'ing it (see system/shared-main.c).
+    # Only the entry point is exported, so calls inside QEMU stay direct.
+    if get_option('system_shared_lib') and target.endswith('-softmmu') and exe['win_subsystem'] == 'console'
+      emulators += {exe['name'] + '-shared': shared_library(exe['name'] + '-shared', files('system/shared-main.c'),
+                    install: true,
+                    c_args: c_args,
+                    dependencies: arch_deps + exe['dependencies'],
+                    objects: lib.extract_all_objects(recursive: true),
+                    link_depends: [block_syms, qemu_syms, shared_main_ver],
+                    link_args: link_args + ['-Wl,--version-script=' + shared_main_ver.full_path()])
+      }
     endif
 
     traceable += [{

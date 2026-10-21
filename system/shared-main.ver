@@ -1,0 +1,7 @@
+/* Exports of libqemu-system-<target>-shared.so: only the entry point. */
+{
+  global:
+    qemu_android_main;
+  local:
+    *;
+};
