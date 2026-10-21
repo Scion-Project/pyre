@@ -94,6 +94,10 @@
 #define USB_NET_SETTLE_MS 100
 #define USB_NET_HS_MPS    512
 
+/* While an endpoint NAKs: poll every 1 ms for the first second, then every 10 ms. */
+#define USB_NET_POLL_NS      (1 * SCALE_MS)
+#define USB_NET_IDLE_POLL_NS (10 * SCALE_MS)
+
 struct USBNetSession
 {
     USBNetUplinkState* s;
@@ -136,22 +140,38 @@ static bool usb_net_session_alive(USBNetUplinkState* s, uint32_t generation)
 }
 
 /*
- * Submit one transfer on a data endpoint and wait for it, parked on the packet
- * if the device completes it later. Returns a USB_RET_* status.
+ * Submit one transfer on a data endpoint and wait for it: polled while the
+ * device NAKs, parked on the packet if it completes later. Returns a
+ * USB_RET_* status.
  */
 static int32_t coroutine_fn usb_net_xfer(USBNetSession* sess, USBUplinkPacket* pkt, bool* busy, uint8_t ep_addr,
                                          void* buf, uint32_t len, uint32_t* actual)
 {
     USBNetUplinkState* s          = sess->s;
     uint32_t           generation = sess->generation;
+    int64_t            started    = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     int32_t            status;
 
     *actual = 0;
     if (sess->stale || !usb_net_session_alive(s, generation)) { return USB_RET_NODEV; }
 
     usb_packet_init(&pkt->p);
-    *busy  = true;
-    status = usb_uplink_transfer(&s->usb, pkt, ep_addr, buf, len, &sess->stale);
+    *busy = true;
+
+    /*
+     * Not usb_uplink_transfer(): an idle link NAKs for as long as nothing is
+     * sent, which is normal here and shouldn't be warned about.
+     */
+    for (;;) {
+        int64_t waited;
+
+        status = usb_uplink_submit(usb_uplink_active(&s->usb), pkt, ep_addr, buf, len);
+        if ((status != USB_RET_NAK && status != USB_RET_IOERROR) || sess->stale) { break; }
+
+        usb_uplink_packet_reset(pkt);
+        waited = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - started;
+        qemu_co_sleep_ns(QEMU_CLOCK_REALTIME, waited > NANOSECONDS_PER_SECOND ? USB_NET_IDLE_POLL_NS : USB_NET_POLL_NS);
+    }
 
     if (status == USB_RET_ASYNC) {
         pkt->waiter = qemu_coroutine_self();
