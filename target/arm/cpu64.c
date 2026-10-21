@@ -680,7 +680,33 @@ static void aarch64_apple_gxf_initfn(Object* obj)
     SET_IDREG(&cpu->isar, ID_AA64ISAR1,
               REG_FIELD_DP64(GET_IDREG(&cpu->isar, ID_AA64ISAR1), ID_AA64ISAR1, APA, PauthFeat_2));
 
-    if (tcg_enabled()) { object_property_set_bool(obj, "pauth-noop", true, NULL); }
+    if (tcg_enabled()) {
+        object_property_set_bool(obj, "pauth-noop", true, NULL);
+
+        /*
+         * Apple A13 (Lightning/Thunder) implements ARMv8.4-A plus PAuth.
+         * "max" also advertises later optional features that the real core
+         * does not have. Drop the ones that make TCG do extra work for every
+         * guest:
+         *  - FEAT_BTI (v8.5): BR/BLR record PSTATE.BTYPE, which is part of
+         *    the TB lookup key (cs_base), so one branch target can need up
+         *    to three TBs that evict each other from the jump cache, and a
+         *    branch to anything but a BTI landing pad calls
+         *    guarded_page_check.
+         *  - FEAT_SVE (optional from v8.2) and FEAT_SME (v9.2): their trap
+         *    state goes into the TB flags, and with SVE every exception
+         *    entry and return runs aarch64_sve_change_el().
+         *  - FEAT_MTE (v8.5): realize already reduces it to EL0
+         *    instructions only without tag memory; the real core has none.
+         * LLVM's apple-a13 definition lists none of these; its apple-a14
+         * entry notes the v8.5 extensions "excluding BTI", and SME first
+         * appears in apple-m4. PAuth (FEAT_PAuth) stays: arm64e needs it.
+         */
+        object_property_set_bool(obj, "sve", false, &error_abort);
+        object_property_set_bool(obj, "sme", false, &error_abort);
+        FIELD_DP64_IDREG(&cpu->isar, ID_AA64PFR1, BT, 0);
+        FIELD_DP64_IDREG(&cpu->isar, ID_AA64PFR1, MTE, 0);
+    }
 
     set_feature(&ARM_CPU(obj)->env, ARM_FEATURE_GXF);
 }
