@@ -1,0 +1,14 @@
+/*
+ * Exports of libqemu-system-<target>-shared.so when -display android is
+ * built in: the entry point plus the host API of ui/android.c.
+ */
+{
+  global:
+    qemu_android_main;
+    qemu_android_display_set_window;
+    qemu_android_display_set_resize_cb;
+    qemu_android_input_touch;
+    qemu_android_input_key;
+  local:
+    *;
+};

@@ -856,6 +856,13 @@ cocoa = dependency('appleframeworks',
                    modules: ['Cocoa', 'CoreVideo', 'QuartzCore'],
                    required: get_option('cocoa'))
 
+# -display android (ui/android.c): draws into an ANativeWindow handed over by
+# the host app. Only meaningful in-process, so only with system_shared_lib.
+nativewindow = not_found
+if get_option('system_shared_lib') and cc.has_header('android/native_window.h')
+  nativewindow = cc.find_library('nativewindow', required: false)
+endif
+
 vmnet = dependency('appleframeworks', modules: 'vmnet', required: get_option('vmnet'))
 if vmnet.found() and not cc.has_header_symbol('vmnet/vmnet.h',
                                               'VMNET_BRIDGED_MODE',
@@ -1690,6 +1697,7 @@ config_host_data.set('CONFIG_BRLAPI', brlapi.found())
 config_host_data.set('CONFIG_BSD', host_os in bsd_oses)
 config_host_data.set('CONFIG_FREEBSD', host_os == 'freebsd')
 config_host_data.set('CONFIG_COCOA', cocoa.found())
+config_host_data.set('CONFIG_ANDROID_DISPLAY', nativewindow.found())
 config_host_data.set('CONFIG_DARWIN', host_os == 'darwin')
 config_host_data.set('CONFIG_GCOV', get_option('b_coverage'))
 config_host_data.set('CONFIG_LIBUDEV', libudev.found())
@@ -3005,7 +3013,8 @@ endif
 
 traceable = []
 emulators = {}
-shared_main_ver = files('system/shared-main.ver')[0]
+# With -display android the library also exports its host API (ui/android.c).
+shared_main_ver = files(nativewindow.found() ? 'system/shared-main-android.ver' : 'system/shared-main.ver')[0]
 if get_option('system_shared_lib') and not get_option('b_staticpic')
   error('system_shared_lib links the static libraries into a shared object; also pass -Db_staticpic=true')
 endif
