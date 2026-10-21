@@ -81,7 +81,7 @@ def build(src, flags, workdir, tag):
 
 
 def run(qemu, img):
-    cmd = [qemu, "-M", "a13-test", "-nodefaults", "-display", "none", "-kernel", img]
+    cmd = [qemu, "-M", "a13-test", "-display", "none", "-monitor", "none", "-serial", "none", "-kernel", img]
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=TIMEOUT)
     except subprocess.TimeoutExpired as e:
