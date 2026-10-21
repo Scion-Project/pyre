@@ -323,7 +323,20 @@ static bool t8030_check_panic(AppleT8030MachineState* t8030)
                      false);
     address_space_set(&address_space_memory, t8030->panic_base, 0, t8030->panic_size, MEMTXATTRS_UNSPECIFIED);
 
-    ret = panic_info->magic == EMBEDDED_PANIC_MAGIC;
+    ret = le32_to_cpu(panic_info->magic) == EMBEDDED_PANIC_MAGIC;
+    if (ret) {
+        // The panic string is otherwise only visible to an attached debugger;
+        // the serial console usually stops before XNU prints it.
+        uint32_t off = le32_to_cpu(panic_info->panic_log_offset);
+        uint32_t len = le32_to_cpu(panic_info->panic_log_len);
+
+        if (off < t8030->panic_size && len <= t8030->panic_size - off) {
+            error_report("Guest panic log:\n%.*s", (int)len, (const char*)panic_info + off);
+        }
+        else {
+            error_report("Guest panicked; panic log out of bounds (offset 0x%x, length 0x%x)", off, len);
+        }
+    }
     g_free(panic_info);
     return ret;
 }
