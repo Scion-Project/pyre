@@ -1,23 +1,34 @@
 # gxf_sptm_regs_test: check for the iOS 27 SPTM register block (M0)
 
-`gxf_sptm_regs_test.S` is a tiny bare-metal AArch64 program that exercises the
-Apple system registers added to `hw/arm/a13_gxf.c` for iOS 27 SPTM/TXM:
+`gxf_sptm_regs_test.S` is a tiny bare-metal AArch64 program that checks every
+Apple system-register encoding iOS 27's SPTM/TXM/kernel were seen to use (see
+ios-on-pixel `docs/ios27/GXF-GAP.md` §3) is reachable on the AppleA13 CPU.
 
-- GXF-space (op1=6, CRn=15): `S3_6_C15_C0_0`, `S3_6_C15_C2_0`, `S3_6_C15_C8_7`
-- Apple EL2 impl-defined (op1=4, CRn=15): `S3_4_C15_C0_0..C0_5`,
-  `S3_4_C15_C1_0..C1_4`, `S3_4_C15_C2_2..C2_5`
+| Encoding | Model | Test |
+|---|---|---|
+| `S3_6_C15_C0_0`, `S3_6_C15_C8_7`, `S3_4_C15_C0_0`, `C0_1`, `C0_3` | SPTM placeholder (storage, `hw/arm/a13_gxf.c`) | write pattern, read back |
+| `S3_6_C15_C2_0` MMU_ERR_STS, `S3_4_C15_C0_2` FED_ERR_STS, `C0_5`, `C1_4` AMX_CTL | A13 core table | read, write same value back |
+| `S3_4_C15_C2_2..C2_5` CTRR_LOCK / A_LWR / A_UPR / CTL | A13 cluster table | read, write same value back |
+| `S3_4_C15_C0_4` APCTL, `C1_0`/`C1_1` KERNELKEYLO/HI, `C1_2` VMSA_LOCK | `target/arm/helper.c` | read, write same value back |
+| `S3_4_C15_C1_3` AMX_STATUS | A13 core table (read-only) | read |
 
 ## What it proves
 
-At non-guarded EL1 it writes a pattern to each register and reads it back. It
-then reproduces SPTM's bootstrap prologue in miniature: `GXF_CONFIG_EL1 = 1`,
+At non-guarded EL1 it runs the checks above. It then reproduces SPTM's
+bootstrap prologue in miniature: `GXF_CONFIG_EL1 = 1`,
 `GXF_ENTER_EL1 = handler`, `GENTER`. It checks that `GXF_STATUS_EL1` reports
-guarded, round-trips the GXF-space registers again from GL1, `GEXIT`s, and
-checks that `GXF_STATUS_EL1` reports non-guarded.
+guarded, re-checks the GXF-space registers from GL1, then `GEXIT`s. It checks
+that GEXIT returns after the GENTER (as a kernel-to-SPTM call does) and that
+`GXF_STATUS_EL1` then reports non-guarded.
 
-Every EL1 and guarded vector (`VBAR_EL1`, `VBAR_GL11`, `GXF_ABORT_EL1`)
-reports FAIL with the ESR, so a missing register (UNDEF) fails closed. A hang
-is caught by the runner's timeout.
+While guarded, the EL1 register names (`VBAR_EL1`, `ELR_EL1`, ...) address the
+GL1 bank, and the `*_GL11` names address the non-guarded EL1 copies (and are
+only accessible from GL1). So the test points the GL1 vectors at its fail
+table with `VBAR_EL1` from inside GL1.
+
+Every EL1 and GL1 vector, and `GXF_ABORT_EL1`, reports FAIL with the ESR, so a
+missing register (UNDEF) fails closed. A hang is caught by the runner's
+timeout.
 
 ## Running it
 
