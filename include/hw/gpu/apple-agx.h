@@ -20,10 +20,8 @@
  */
 SysBusDevice* apple_agx_create(AppleDTNode* sgx, AppleDTNode* gfx_asc);
 
-/* pmap-io-ranges signatures the kernel expects on the UAT regions. */
-#define AGX_PMAP_SIG_SHARED  (0)
-#define AGX_PMAP_SIG_TTBAT   (0)
-#define AGX_PMAP_SIG_HANDOFF (0)
+/* pmap-io-ranges signature the kernel expects on the UAT regions ('GUAT'). */
+#define AGX_PMAP_SIG_UAT (0x47554154)
 
 /* Each UAT region the boot loader carves out is one 16 KiB page. */
 #define AGX_UAT_REGION_SIZE (16 * KiB)

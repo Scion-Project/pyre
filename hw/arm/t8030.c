@@ -921,9 +921,9 @@ static void t8030_gpu_mem_setup(AppleT8030MachineState* t8030, CarveoutAllocator
     apple_dt_set_prop_u32(sgx, "ttbat-phys-addr-base", ttbat / AGX_UAT_REGION_SIZE);
     apple_dt_set_prop_u64(sgx, "gfx-handoff-base", handoff);
 
-    t8030_add_pmap_io_range(t8030, shared, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_SHARED);
-    t8030_add_pmap_io_range(t8030, ttbat, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_TTBAT);
-    t8030_add_pmap_io_range(t8030, handoff, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_HANDOFF);
+    t8030_add_pmap_io_range(t8030, shared, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_UAT);
+    t8030_add_pmap_io_range(t8030, ttbat, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_UAT);
+    t8030_add_pmap_io_range(t8030, handoff, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_UAT);
 
     apple_agx_set_uat_regions(SYS_BUS_DEVICE(object_property_get_link(OBJECT(t8030), "agx", &error_fatal)), shared,
                               ttbat, handoff);
