@@ -2,5 +2,7 @@
 
 # mt-spi.c
 apple_mt_spi_mtt_event(const char *type, int64_t slot, int64_t tracking_id, const char *axis, int64_t value) "%s slot %" PRId64 " id %" PRId64 " %s %" PRId64
+apple_mt_spi_ll_rx(uint8_t type, uint8_t iface, uint16_t off, uint16_t remaining, uint16_t len) "LL rx type 0x%x iface %u off %u remaining %u len %u"
+apple_mt_spi_ll_rx_hid(uint8_t type, uint8_t report_id, uint8_t status, uint8_t frame, uint16_t len_req, uint16_t len, uint64_t data0, uint64_t data1) "HID rx type 0x%x report 0x%x status %u frame %u len_req %u len %u data 0x%016" PRIx64 "%016" PRIx64
 apple_mt_spi_frame(uint8_t frame, uint8_t paths) "frame %u: %u paths"
 apple_mt_spi_frame_path(uint8_t frame, uint8_t path_id, uint8_t stage, uint8_t finger_id, int x, int y, uint16_t flags) "frame %u path %u stage %u finger %u x %d y %d flags 0x%x"
