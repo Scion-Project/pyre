@@ -21,7 +21,7 @@
 #include "agx-uat.h"
 #include "trace.h"
 
-OBJECT_DECLARE_TYPE(AppleAGXState, AppleAGXClass, APPLE_AGX)
+OBJECT_DECLARE_TYPE(AppleAGXState, AppleAGXStateClass, APPLE_AGX)
 
 /* RTKit user endpoints (EP 0x20/0x21), as on G13 (drm/asahi gpu.rs). */
 #define AGX_EP_FIRMWARE (0x20 - RTKIT_EP_USER_START)
@@ -58,7 +58,7 @@ typedef struct
     int          index;
 } AppleAGXRegBank;
 
-struct AppleAGXClass
+struct AppleAGXStateClass
 {
     AppleRTKitClass  parent_class;
     ResettablePhases parent_phases;
@@ -216,7 +216,7 @@ SysBusDevice* apple_agx_create(AppleDTNode* sgx, AppleDTNode* gfx_asc)
 static void apple_agx_reset_hold(Object* obj, ResetType type)
 {
     AppleAGXState* s  = APPLE_AGX(obj);
-    AppleAGXClass* ac = APPLE_AGX_GET_CLASS(obj);
+    AppleAGXStateClass* ac = APPLE_AGX_GET_CLASS(obj);
 
     if (ac->parent_phases.hold != NULL) { ac->parent_phases.hold(obj, type); }
 
@@ -232,7 +232,7 @@ static void apple_agx_class_init(ObjectClass* klass, const void* data)
 {
     ResettableClass* rc = RESETTABLE_CLASS(klass);
     DeviceClass*     dc = DEVICE_CLASS(klass);
-    AppleAGXClass*   ac = APPLE_AGX_CLASS(klass);
+    AppleAGXStateClass*   ac = APPLE_AGX_CLASS(klass);
 
     resettable_class_set_parent_phases(rc, NULL, apple_agx_reset_hold, NULL, &ac->parent_phases);
     dc->desc = "Apple AGX GPU (firmware HLE)";
