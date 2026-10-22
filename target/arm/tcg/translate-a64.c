@@ -9043,6 +9043,19 @@ static void aarch64_tr_translate_insn(DisasContextBase* dcbase, CPUState* cpu)
     insn            = arm_ldl_code(env, &s->base, pc, s->sctlr_b);
     s->insn         = insn;
     s->base.pc_next = pc + 4;
+    if (qemu_loglevel_mask(CPU_LOG_TB_OUT_ASM)) { /* tbprof */
+        static bool offs_done;
+        if (!offs_done) {
+            offs_done = true;
+            qemu_log("OFFS xregs=%zu pc=%zu CF=%zu VF=%zu NF=%zu ZF=%zu excl_addr=%zu excl_val=%zu zregs=%zu zregs_end=%zu sizeof=%zu\n",
+                     offsetof(CPUARMState, xregs), offsetof(CPUARMState, pc), offsetof(CPUARMState, CF),
+                     offsetof(CPUARMState, VF), offsetof(CPUARMState, NF), offsetof(CPUARMState, ZF),
+                     offsetof(CPUARMState, exclusive_addr), offsetof(CPUARMState, exclusive_val),
+                     offsetof(CPUARMState, vfp.zregs), offsetof(CPUARMState, vfp.zregs) + sizeof(env->vfp.zregs),
+                     sizeof(CPUARMState));
+        }
+        qemu_log("G %" PRIx64 " %08x\n", (uint64_t)pc, insn);
+    }
 
     s->fp_access_checked  = 0;
     s->sve_access_checked = 0;
