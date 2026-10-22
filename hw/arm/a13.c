@@ -173,18 +173,35 @@ static void apple_a13_cluster_cpreg_write(CPUARMState* env, const ARMCPRegInfo* 
     *(uint64_t*)((char*)(c) + (ri)->fieldoffset) = value;
 }
 
-/* Deliver IPI */
-static void apple_a13_deliver_ipi(AppleA13State* cpu, uint64_t src_cpu, uint64_t flag)
+/* Deliver IPI. Returns false if the destination already had one in flight --
+ * the caller (an immediate send) is on its own to remember the source and
+ * retry, since nothing here revisits a drop by itself. */
+static bool apple_a13_deliver_ipi(AppleA13State* cpu, uint64_t src_cpu, uint64_t flag)
 {
     trace_apple_a13_ipi_deliver(cpu->cpu_id, src_cpu, flag, cpu->ipi_sr != 0);
-    if (cpu->ipi_sr) { return; }
+    if (cpu->ipi_sr) { return false; }
 
     cpu->ipi_sr = 1LL | (src_cpu << IPI_SR_SRC_CPU_SHIFT) | flag;
     qemu_irq_raise(cpu->fast_ipi);
+    return true;
 }
 
 static void apple_a13_cluster_deliver_ipi(AppleA13Cluster* c, uint64_t cpu_id, uint64_t src_cpu, uint64_t flag)
 { apple_a13_deliver_ipi(c->cpus[cpu_id], src_cpu, flag); }
+
+/* An immediate IPI whose destination was already busy has nowhere else to
+ * wait -- deferred/no-wake sends are retried every tick by
+ * apple_a13_cluster_tick, but an immediate send that apple_a13_deliver_ipi
+ * drops is otherwise gone for good. Recorded here, indexed by destination,
+ * and replayed from apple_a13_ipi_write_sr the moment that destination
+ * acknowledges its current IPI and has room for another. */
+static void apple_a13_send_immediate_ipi(AppleA13Cluster* c, AppleA13State* dst_acpu, uint64_t dst_cpu_id,
+                                         uint64_t src_cpu)
+{
+    if (!apple_a13_deliver_ipi(dst_acpu, src_cpu, IPI_RR_TYPE_IMMEDIATE)) {
+        c->pendingImmediateIPI[dst_cpu_id] |= BIT32(src_cpu);
+    }
+}
 
 static int add_cpu_to_cluster(Object* obj, void* opaque)
 {
@@ -289,7 +306,7 @@ static void apple_a13_ipi_rr_local(CPUARMState* env, const ARMCPRegInfo* ri, uin
         case IPI_RR_TYPE_NOWAKE:
             if (apple_a13_is_asleep(dst_acpu)) { c->noWakeIPI[acpu->cpu_id] |= BIT32(dst_cpu_id); }
             else {
-                apple_a13_deliver_ipi(dst_acpu, acpu->cpu_id, IPI_RR_TYPE_IMMEDIATE);
+                apple_a13_send_immediate_ipi(c, dst_acpu, dst_cpu_id, acpu->cpu_id);
             }
             break;
         case IPI_RR_TYPE_DEFERRED: c->deferredIPI[acpu->cpu_id] |= BIT32(dst_cpu_id); break;
@@ -297,7 +314,7 @@ static void apple_a13_ipi_rr_local(CPUARMState* env, const ARMCPRegInfo* ri, uin
             c->deferredIPI[acpu->cpu_id] &= ~BIT32(dst_cpu_id);
             c->noWakeIPI[acpu->cpu_id]   &= ~BIT32(dst_cpu_id);
             break;
-        case IPI_RR_TYPE_IMMEDIATE: apple_a13_deliver_ipi(dst_acpu, acpu->cpu_id, IPI_RR_TYPE_IMMEDIATE); break;
+        case IPI_RR_TYPE_IMMEDIATE: apple_a13_send_immediate_ipi(c, dst_acpu, dst_cpu_id, acpu->cpu_id); break;
         default                   : assert_not_reached();
     }
 }
@@ -335,7 +352,7 @@ static void apple_a13_ipi_rr_global(CPUARMState* env, const ARMCPRegInfo* ri, ui
         case IPI_RR_TYPE_NOWAKE:
             if (apple_a13_is_asleep(dst_acpu)) { cluster->noWakeIPI[acpu->cpu_id] |= BIT32(dst_cpu_id); }
             else {
-                apple_a13_deliver_ipi(dst_acpu, acpu->cpu_id, IPI_RR_TYPE_IMMEDIATE);
+                apple_a13_send_immediate_ipi(cluster, dst_acpu, dst_cpu_id, acpu->cpu_id);
             }
             break;
         case IPI_RR_TYPE_DEFERRED: cluster->deferredIPI[acpu->cpu_id] |= BIT32(dst_cpu_id); break;
@@ -343,7 +360,7 @@ static void apple_a13_ipi_rr_global(CPUARMState* env, const ARMCPRegInfo* ri, ui
             cluster->deferredIPI[acpu->cpu_id] &= ~BIT32(dst_cpu_id);
             cluster->noWakeIPI[acpu->cpu_id]   &= ~BIT32(dst_cpu_id);
             break;
-        case IPI_RR_TYPE_IMMEDIATE: apple_a13_deliver_ipi(dst_acpu, acpu->cpu_id, IPI_RR_TYPE_IMMEDIATE); break;
+        case IPI_RR_TYPE_IMMEDIATE: apple_a13_send_immediate_ipi(cluster, dst_acpu, dst_cpu_id, acpu->cpu_id); break;
         default                   : assert_not_reached();
     }
 }
@@ -371,6 +388,17 @@ static void apple_a13_ipi_write_sr(CPUARMState* env, const ARMCPRegInfo* ri, uin
         case IPI_RR_TYPE_NOWAKE  : c->noWakeIPI[src_cpu] &= ~BIT32(acpu->cpu_id); break;
         case IPI_RR_TYPE_DEFERRED: c->deferredIPI[src_cpu] &= ~BIT32(acpu->cpu_id); break;
         default                  : break;
+    }
+
+    /* This CPU just freed up its one IPI slot. Anything an immediate send
+     * found busy earlier and left waiting here gets its turn now -- without
+     * this, that sender's wakeup is gone for good, and MTTCG's wider window
+     * between "found busy" and "would have retried" makes hitting it far
+     * likelier than on real hardware. */
+    if (c->pendingImmediateIPI[acpu->cpu_id]) {
+        uint32_t pending_src = ctz32(c->pendingImmediateIPI[acpu->cpu_id]);
+        c->pendingImmediateIPI[acpu->cpu_id] &= ~BIT32(pending_src);
+        apple_a13_deliver_ipi(acpu, pending_src, IPI_RR_TYPE_IMMEDIATE);
     }
 }
 
@@ -664,6 +692,7 @@ static void apple_a13_cluster_reset_enter(Object* obj, ResetType type)
     AppleA13Cluster* cluster = APPLE_A13_CLUSTER(obj);
     memset(cluster->deferredIPI, 0, sizeof(cluster->deferredIPI));
     memset(cluster->noWakeIPI, 0, sizeof(cluster->noWakeIPI));
+    memset(cluster->pendingImmediateIPI, 0, sizeof(cluster->pendingImmediateIPI));
 }
 
 static void apple_a13_cluster_class_init(ObjectClass* klass, const void* data)
