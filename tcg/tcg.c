@@ -3003,6 +3003,7 @@ void tcg_op_remove(TCGContext* s, TCGOp* op)
         case INDEX_op_br         : remove_label_use(op, 0); break;
         case INDEX_op_brcond     : remove_label_use(op, 3); break;
         case INDEX_op_brcond2_i32: remove_label_use(op, 5); break;
+        case INDEX_op_sit_brcond : remove_label_use(op, 1); break;
         default                  : break;
     }
 
@@ -3092,6 +3093,7 @@ static void move_label_uses(TCGLabel* to, TCGLabel* from)
             case INDEX_op_br         : op->args[0] = label_arg(to); break;
             case INDEX_op_brcond     : op->args[3] = label_arg(to); break;
             case INDEX_op_brcond2_i32: op->args[5] = label_arg(to); break;
+            case INDEX_op_sit_brcond : op->args[1] = label_arg(to); break;
             default                  : assert_not_reached();
         }
     }
@@ -6003,6 +6005,7 @@ int tcg_gen_code(TCGContext* s, TranslationBlock* tb, uint64_t pc_start)
 
     QSIMPLEQ_INIT(&s->ldst_labels);
     s->pool_labels = NULL;
+    s->sit         = NULL;
 
     s->gen_insn_data = tcg_malloc(sizeof(uint64_t) * s->gen_tb->icount * INSN_START_WORDS);
 
@@ -6057,6 +6060,16 @@ int tcg_gen_code(TCGContext* s, TranslationBlock* tb, uint64_t pc_start)
             case INDEX_op_goto_tb: tcg_out_goto_tb(s, op->args[0]); break;
             case INDEX_op_br     : tcg_out_br(s, arg_label(op->args[0])); break;
             case INDEX_op_mb     : tcg_out_mb(s, op->args[0]); break;
+#if TCG_TARGET_HAS_sit
+            case INDEX_op_sit_enter:
+                /* Like a label: TCG's globals go to memory, its registers are free. */
+                tcg_reg_alloc_bb_end(s, s->reserved_regs);
+                tcg_out_sit_enter(s, (const SitLayout*)op->args[0]);
+                break;
+            case INDEX_op_sit      : tcg_out_sit(s, (const SitInsn*)op->args[0], NULL); break;
+            case INDEX_op_sit_exit : tcg_out_sit_exit(s); break;
+            case INDEX_op_sit_brcond: tcg_out_sit(s, (const SitInsn*)op->args[0], arg_label(op->args[1])); break;
+#endif
             case INDEX_op_dup2_vec:
                 if (tcg_reg_alloc_dup2(s, op)) { break; }
                 /* fall through */
@@ -6086,6 +6099,10 @@ int tcg_gen_code(TCGContext* s, TranslationBlock* tb, uint64_t pc_start)
     /* Generate TB finalization at the end of block */
     i = tcg_out_ldst_finalize(s);
     if (i < 0) { return i; }
+#if TCG_TARGET_HAS_sit
+    i = tcg_out_sit_finalize(s);
+    if (i < 0) { return i; }
+#endif
     i = tcg_out_pool_finalize(s);
     if (i < 0) { return i; }
     if (!tcg_resolve_relocs(s)) { return -2; }

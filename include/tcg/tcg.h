@@ -413,6 +413,9 @@ struct TCGContext
 
     TCGLabel* exitreq_label;
 
+    /* Same-ISA translation regions of the TB being generated (backend-private). */
+    struct TCGSitState* sit;
+
     /* For host-specific values. */
 #ifdef __riscv
     MemOp   riscv_cur_vsew;

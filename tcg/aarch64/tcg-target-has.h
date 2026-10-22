@@ -25,6 +25,9 @@
 /* Arm FP on the host FPU (fp1/fp2/fp3_vec): only meaningful for an AArch64 guest. */
 #define TCG_TARGET_HAS_fp_vec 1
 
+/* Same-ISA translation regions (tcg/tcg-sit.h): AArch64 guests only. */
+#define TCG_TARGET_HAS_sit 1
+
 #define TCG_TARGET_HAS_andc_vec   1
 #define TCG_TARGET_HAS_orc_vec    1
 #define TCG_TARGET_HAS_nand_vec   0
