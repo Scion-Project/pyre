@@ -2453,6 +2453,74 @@ static const TCGOutOpStore outop_st = {
     .out_r                  = tcg_out_st,
 };
 
+/*
+ * Arm floating point on the host FPU (fp1/fp2/fp3_vec). Encodings: AdvSIMD
+ * three-same / two-reg-misc (Q at bit 30, sz at bit 22), and the scalar
+ * FP data-processing forms (ftype at bits 23:22), which zero the rest of the
+ * vector register. A 64-bit vector of doubles has one element, so it also
+ * uses the scalar forms.
+ */
+static void tcg_out_fp_vec(TCGContext* s, TCGOpcode opc, bool is_q, unsigned vece, const TCGArg* args)
+{
+    /* AdvSIMD vector, indexed by TCGFPOp */
+    static const uint32_t vec3[] = {
+        [TCG_FP_ADD] = 0x0e20d400,  [TCG_FP_SUB] = 0x0ea0d400,   [TCG_FP_MUL] = 0x2e20dc00,
+        [TCG_FP_DIV] = 0x2e20fc00,  [TCG_FP_MAX] = 0x0e20f400,   [TCG_FP_MIN] = 0x0ea0f400,
+        [TCG_FP_MAXNM] = 0x0e20c400, [TCG_FP_MINNM] = 0x0ea0c400, [TCG_FP_ABD] = 0x2ea0d400,
+        [TCG_FP_CMEQ] = 0x0e20e400, [TCG_FP_CMGE] = 0x2e20e400,  [TCG_FP_CMGT] = 0x2ea0e400,
+        [TCG_FP_MADD] = 0x0e20cc00, [TCG_FP_MSUB] = 0x0ea0cc00,
+    };
+    /* scalar: FP data-processing 2-source, or AdvSIMD scalar three-same (bit 28 clear) */
+    static const uint32_t sca3[] = {
+        [TCG_FP_ADD] = 0x1e202800,  [TCG_FP_SUB] = 0x1e203800,   [TCG_FP_MUL] = 0x1e200800,
+        [TCG_FP_DIV] = 0x1e201800,  [TCG_FP_MAX] = 0x1e204800,   [TCG_FP_MIN] = 0x1e205800,
+        [TCG_FP_MAXNM] = 0x1e206800, [TCG_FP_MINNM] = 0x1e207800, [TCG_FP_ABD] = 0x7ea0d400,
+        [TCG_FP_CMEQ] = 0x5e20e400, [TCG_FP_CMGE] = 0x7e20e400,  [TCG_FP_CMGT] = 0x7ea0e400,
+    };
+    /* scalar FP data-processing 3-source: Rd = f(Ra, Rn, Rm) */
+    static const uint32_t sca4[] = {
+        [TCG_FP_MADD] = 0x1f000000, [TCG_FP_MSUB] = 0x1f008000,
+        [TCG_FP_NMADD] = 0x1f200000, [TCG_FP_NMSUB] = 0x1f208000,
+    };
+    TCGReg   rd = args[0] & 0x1f, rn = args[1] & 0x1f, rm, ra;
+    TCGFPOp  fop;
+    bool     scalar;
+    uint32_t sz = (vece == MO_64) << 22, insn;
+
+    switch (opc) {
+        case INDEX_op_fp1_vec:
+            fop    = args[2];
+            scalar = args[3] || (!is_q && vece == MO_64);
+            tcg_debug_assert(fop == TCG_FP_SQRT);
+            insn = scalar ? 0x1e21c000 | sz : 0x2ea1f800 | sz | (uint32_t)is_q << 30;
+            tcg_out32(s, insn | rn << 5 | rd);
+            break;
+        case INDEX_op_fp2_vec:
+            rm     = args[2] & 0x1f;
+            fop    = args[3];
+            scalar = args[4] || (!is_q && vece == MO_64);
+            tcg_debug_assert(fop < ARRAY_SIZE(sca3) && sca3[fop]);
+            insn = scalar ? sca3[fop] | sz : vec3[fop] | sz | (uint32_t)is_q << 30;
+            tcg_out32(s, insn | rm << 16 | rn << 5 | rd);
+            break;
+        case INDEX_op_fp3_vec:
+            /* rd == rn (the accumulator) by constraint */
+            rn     = args[2] & 0x1f;
+            rm     = args[3] & 0x1f;
+            ra     = args[1] & 0x1f;
+            fop    = args[4];
+            scalar = args[5] || (!is_q && vece == MO_64);
+            tcg_debug_assert(fop < ARRAY_SIZE(sca4) && sca4[fop]);
+            if (scalar) { tcg_out32(s, sca4[fop] | sz | rm << 16 | ra << 10 | rn << 5 | rd); }
+            else {
+                tcg_debug_assert(fop == TCG_FP_MADD || fop == TCG_FP_MSUB);
+                tcg_out32(s, vec3[fop] | sz | (uint32_t)is_q << 30 | rm << 16 | rn << 5 | rd);
+            }
+            break;
+        default: g_assert_not_reached();
+    }
+}
+
 static void tcg_out_vec_op(TCGContext* s, TCGOpcode opc, unsigned vecl, unsigned vece,
                            const TCGArg args[TCG_MAX_OP_ARGS], const int const_args[TCG_MAX_OP_ARGS])
 {
@@ -2718,6 +2786,10 @@ static void tcg_out_vec_op(TCGContext* s, TCGOpcode opc, unsigned vecl, unsigned
             }
             break;
 
+        case INDEX_op_fp1_vec:
+        case INDEX_op_fp2_vec:
+        case INDEX_op_fp3_vec: tcg_out_fp_vec(s, opc, is_q, vece, args); break;
+
         case INDEX_op_mov_vec: /* Always emitted via tcg_out_mov.  */
         case INDEX_op_dup_vec: /* Always emitted via tcg_out_dup_vec.  */
         default              : assert_not_reached();
@@ -2757,6 +2829,9 @@ int tcg_can_emit_vec_op(TCGOpcode opc, TCGType type, unsigned vece)
         case INDEX_op_smin_vec  :
         case INDEX_op_umax_vec  :
         case INDEX_op_umin_vec  : return vece < MO_64;
+        case INDEX_op_fp1_vec   :
+        case INDEX_op_fp2_vec   :
+        case INDEX_op_fp3_vec   : return vece == MO_32 || vece == MO_64;
 
         default: return 0;
     }
@@ -2842,7 +2917,10 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op, TCGType type, unsig
         case INDEX_op_shlv_vec     :
         case INDEX_op_shrv_vec     :
         case INDEX_op_sarv_vec     :
-        case INDEX_op_aa64_sshl_vec: return C_O1_I2(w, w, w);
+        case INDEX_op_aa64_sshl_vec:
+        case INDEX_op_fp2_vec      : return C_O1_I2(w, w, w);
+        case INDEX_op_fp1_vec      : return C_O1_I1(w, w);
+        case INDEX_op_fp3_vec      : return C_O1_I3(w, 0, w, w);
         case INDEX_op_not_vec      :
         case INDEX_op_neg_vec      :
         case INDEX_op_abs_vec      :

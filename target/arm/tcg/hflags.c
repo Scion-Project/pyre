@@ -13,6 +13,7 @@
 #include "accel/tcg/cpu-ops.h"
 #include "accel/tcg/tb-lookup.h"
 #include "cpregs.h"
+#include "native-fp.h"
 
 #define HELPER_H "tcg/helper.h"
 #include "exec/helper-proto.h.inc"
@@ -331,6 +332,7 @@ static CPUARMTBFlags rebuild_hflags_a64(CPUARMState* env, int el, int fp_el, ARM
     }
 
     if (env->vfp.fpcr & FPCR_AH) { DP_TBFLAG_A64(flags, AH, 1); }
+    if (arm_native_fp_inline && !(env->vfp.fpcr & ARM_NATIVE_FP_FPCR_MASK)) { DP_TBFLAG_A64(flags, NATIVE_FP, 1); }
     if (env->vfp.fpcr & FPCR_NEP) {
         /*
          * In streaming-SVE without FA64, NEP behaves as if zero;
