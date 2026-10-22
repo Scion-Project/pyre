@@ -42,30 +42,9 @@
 
 static const char* KEEP_COMP[] = {
     "adbe0,s8000\0$",
-    // "aop-audio\0$",
-    // "aop-audio-control\0$",
-    // "aop-audio-speaker\0$",
-    // "audio-aop-lp-mic-in\0$",
-    // "audio-aop-mca2\0$",
-    // "audio-aop-pcmaudiomgr\0$",
-    // "alc,t8030\0$",
-    // "audio-data,aop-audio-haptic\0$",
-    // "audio-data,halogen\0$",
-    // "audio-data,hawking\0$",
     // "audio-data,baseband-voice\0$",
-    // "audio-data,dsp-debug1\0$",
-    // "audio-data,mikeybus-secondary\0$",
     // "audio-data,aop-audio-hpdb\0$",
-    // "halle-sensor,aop-ad5860-config\0$",
-    // "audio-aop-hall\0$",
     // "audio-aop-hpdbg\0$",
-    // "audio-aop-haptic\0$",
-    // "audio-aop-haptic-leap\0$",
-    // "audio-aop-hapticmgr\0$",
-    // "aop-audio-hpdbg\0$",
-    // "audio-data,aop-audio-hpdbg\0$",
-    // "haptics-support,leap\0$",
-    // "audio-data,audio-loopback\0$",
     "aes,s8000\0$",
     "aic,1\0$",
     "apcie-bridge\0$",
@@ -166,9 +145,14 @@ static const char* KEEP_COMP[] = {
     "i2c,t8101\0i2c,s5l8940x\0iic,soft\0$",
 };
 
-// Kept only with audio=on: the speaker path through the MCA (I2S) clusters,
-// the CS42L77 codec on SPI3 and the CS35L27 amp on I2C2.
+// Kept only with audio=on (AppleBootInfo.audio). Each of these nodes pulls in a
+// driver that waits on its neighbours, so the tree is only useful complete; without
+// audio=on none of it reaches the guest and none of those drivers load.
+// The audio part of this list follows MakrSas/Inferno (branch ios), which got
+// playback and recording working end to end with it.
 static const char* AUDIO_COMP[] = {
+    // The speaker path: the MCA (I2S) switch and clusters, the CS42L77 codec on
+    // SPI3, the CS35L27 amp on I2C2 and the audio resource manager.
     "mca-switch,t8030\0$",
     "mcaCluster,t8030\0$",
     "mca,t8030\0$",
@@ -177,6 +161,46 @@ static const char* AUDIO_COMP[] = {
     "audio-control,cs42l77\0$",
     "audio-data,cs42l77\0$",
     "audio,embedded-resource-manager\0$",
+    // The AOP audio service (hw/audio/aop-audio.c) and its devices. The amp waits
+    // for aop-audio-speaker as its power provider, and the resource manager needs
+    // the PCM asset manager before it publishes anything to userspace.
+    "aop-audio\0$",
+    "aop-audio-speaker\0$",
+    "aop-audio-control\0$",
+    "audio-aop-pcmaudiomgr\0$",
+    // The AOP's own MCA data devices: the model advertises 'mca0' and 'mca1'.
+    "audio-aop-mca2\0$",
+    // The always-listening microphone ('lpai'). The CS42L77's function-codec_lpmic
+    // names it; without it the AOP audio controller cannot hand out buffers.
+    "audio-aop-lp-mic-in\0$",
+    // The CS42L77's function-halogen_master, -hawk_master, -dsp-debug1_master and
+    // -msp_master name these data nodes; without them AppleCS42L77Audio::start
+    // waits for providers that never appear.
+    "audio-data,halogen\0$",
+    "audio-data,hawking\0$",
+    "audio-data,dsp-debug1\0$",
+    "audio-data,mikeybus-secondary\0$",
+    "audio-data,audio-loopback\0$",
+    // alc0..3: the I2S links the AOP drives itself ('aph ', 'aphd'), with their
+    // headphone-debug children.
+    "alc,t8030\0$",
+    "aop-audio-hpdbg\0$",
+    "audio-data,aop-audio-hpdbg\0$",
+    // The haptics chain. The audio server counts the actuator as a transducer;
+    // without it the built-in route comes up empty (AVAudioSession 'nort').
+    "aop-audio-haptic\0$",
+    "audio-aop-hapticmgr\0$",
+    "audio-data,aop-audio-haptic\0$",
+    "audio-aop-haptic-leap\0$",
+    "haptics-support,leap\0$",
+    "audio-aop-hall\0$",
+    "halle-sensor,aop-ad5860-config\0$",
+};
+
+// Names in REM_NAMES that audio=on keeps: `aop-mca` is the AOP's own MCA, which
+// the AOP audio devices describe their links through.
+static const char* AUDIO_KEEP_NAMES[] = {
+    "aop-mca\0$",
 };
 
 static const char* REM_NAMES[] = {
@@ -328,7 +352,9 @@ static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent, b
         && !(keep_gpu && apple_boot_dt_match(prop, GPU_KEEP_NAMES, ARRAY_SIZE(GPU_KEEP_NAMES))))
     {
         assert_nonnull(prop->data);
-        for (i = 0; i < ARRAY_SIZE(REM_NAMES); i++) {
+        bool keep_name = audio && apple_boot_dt_match(prop, AUDIO_KEEP_NAMES, ARRAY_SIZE(AUDIO_KEEP_NAMES));
+
+        for (i = 0; !keep_name && i < ARRAY_SIZE(REM_NAMES); i++) {
             uint64_t size = MIN(prop->len, sstrlen(REM_NAMES[i]));
             if (memcmp(prop->data, REM_NAMES[i], size) == 0) {
                 assert_nonnull(parent);
