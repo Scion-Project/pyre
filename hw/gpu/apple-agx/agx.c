@@ -226,6 +226,7 @@ SysBusDevice* apple_agx_create(AppleDTNode* sgx, AppleDTNode* gfx_asc)
     AppleDTProp*   prop;
     uint64_t*      asc_reg;
     uint64_t*      sgx_reg;
+    AppleDTNode*   nub;
 
     dev = qdev_new(TYPE_APPLE_AGX);
     s   = APPLE_AGX(dev);
@@ -243,6 +244,13 @@ SysBusDevice* apple_agx_create(AppleDTNode* sgx, AppleDTNode* gfx_asc)
     apple_rtkit_init(APPLE_RTKIT(dev), s, "GFX", asc_reg[1], APPLE_A7IOP_V4, &agx_rtkit_ops);
     apple_rtkit_register_user_ep(APPLE_RTKIT(dev), AGX_EP_FIRMWARE, s, agx_ep_firmware);
     apple_rtkit_register_user_ep(APPLE_RTKIT(dev), AGX_EP_DOORBELL, s, agx_ep_doorbell);
+
+    /* Like the other HLE'd IOPs: the "firmware" is already loaded and
+     * running, so RTBuddy resumes it instead of loading an image. */
+    nub = apple_dt_get_node(gfx_asc, "iop-gfx-nub");
+    assert_nonnull(nub);
+    apple_dt_set_prop_u32(nub, "pre-loaded", 1);
+    apple_dt_set_prop_u32(nub, "running", 1);
 
     memory_region_init_io(&s->asc_wrap, OBJECT(dev), &agx_asc_wrap_ops, s, TYPE_APPLE_AGX ".asc-wrap", asc_reg[3]);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->asc_wrap);
