@@ -78,7 +78,7 @@ static void tcg_accel_instance_init(Object* obj)
     s->splitwx_enabled = 0;
 #endif
     s->asid_tlbs = TLB_ASID_CTX_DEFAULT_SLOTS;
-    s->asid_jc   = true;
+    s->asid_jc   = false;
     s->tlb_bits  = TLB_FLOOR_BITS_DEFAULT;
 }
 
@@ -307,7 +307,7 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
                                           "log2 of the smallest softmmu TLB size per MMU mode (default 10)");
 
     object_class_property_add_bool(oc, "x-asid-jc", tcg_get_asid_jc, tcg_set_asid_jc);
-    object_class_property_set_description(oc, "x-asid-jc", "Keep jump caches with the asid-tlbs TLBs (default on)");
+    object_class_property_set_description(oc, "x-asid-jc", "Keep jump caches with the asid-tlbs TLBs (default off)");
 
     object_class_property_add_bool(oc, "split-wx", tcg_get_splitwx, tcg_set_splitwx);
     object_class_property_set_description(oc, "split-wx", "Map jit pages into separate RW and RX regions");
