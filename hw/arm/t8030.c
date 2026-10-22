@@ -31,6 +31,7 @@
 #include "hw/arm/sptm-boot.h"
 #include "hw/arm/sep/sim.h"
 #include "hw/arm/sep/emu.h"
+#include "hw/arm/sep/rom-idle.h"
 #include "hw/arm/t8030-config.c.inc"
 #include "hw/arm/t8030.h"
 #include "hw/audio/aop-audio.h"
@@ -875,6 +876,8 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
     gsize              fsize;
     CarveoutAllocator* ca;
     CKPatcherRange*    seprom_range;
+    AppleSEP*          sep;
+    bool               sep_idle;
 
     apple_dt_unfinalise(t8030->device_tree);
 
@@ -908,6 +911,18 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
         ck_sep_seprom_patches(seprom_range);
 
         address_space_rw(&address_space_memory, SEPROM_BASE, MEMTXATTRS_UNSPECIFIED, (uint8_t*)seprom, fsize, true);
+
+        // A placeholder ROM that can only idle (`b .`, a WFI loop) would spin
+        // the SEP vCPU forever: WFI returns at once while the AP's messages
+        // sit unread in the SEP inbox. Such a core can't do anything the guest
+        // could see, so leave it powered off instead.
+        sep_idle = apple_sep_rom_is_idle_loop(seprom, fsize);
+        sep      = APPLE_SEP(object_property_get_link(OBJECT(t8030), "sep", &error_fatal));
+        if (sep_idle && !apple_sep_is_cpu_parked(sep)) {
+            info_report("SEP ROM `%s` only idles (WFI/B loop); keeping the SEP core powered off",
+                        t8030->sep_rom_filename);
+        }
+        apple_sep_set_cpu_parked(sep, sep_idle);
 
         g_free(seprom);
     }
@@ -1249,7 +1264,8 @@ static void pmgr_reg_write(void* opaque, hwaddr addr, uint64_t data, unsigned si
         case 0x80C00:    // SEP_PS
             sep = APPLE_SEP(object_property_get_link(OBJECT(t8030), "sep", NULL));
 
-            if (sep != NULL) {
+            // A parked SEP core (idle-only placeholder ROM) stays off.
+            if (sep != NULL && !apple_sep_is_cpu_parked(sep)) {
                 if (data & BIT32(31)) { apple_a13_reset(APPLE_A13(apple_sep_get_cpu(sep))); }
                 else if (data & BIT32(10)) {
                     apple_a13_set_off(APPLE_A13(apple_sep_get_cpu(sep)));

@@ -72,6 +72,14 @@ void      apple_sep_setup_tz0(AppleSEP* s, MemoryRegion* dram, hwaddr tz0_off, h
 ARMCPU*   apple_sep_get_cpu(AppleSEP* s);    // FIXME: remove
 
 /*
+ * Keep the SEP core powered off whatever the AP writes to SEP_PS. Used when the
+ * SEP ROM can only idle (apple_sep_rom_is_idle_loop()): running it would burn a
+ * host thread without the guest being able to tell the difference.
+ */
+void apple_sep_set_cpu_parked(AppleSEP* s, bool parked);
+bool apple_sep_is_cpu_parked(AppleSEP* s);
+
+/*
  * Check that a SEP ROM or SEP firmware image could be real before loading it:
  * not empty, no larger than the region it is loaded into, and not one byte
  * repeated (a zero-filled placeholder, for example). The format is not checked,
