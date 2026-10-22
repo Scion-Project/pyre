@@ -23,6 +23,7 @@
 #include "cpu-features.h"
 #include "fpu/softfloat.h"
 #include "qemu/log.h"
+#include "native-fp.h"
 
 #define HELPER_H "tcg/helper.h"
 #include "exec/helper-proto.h.inc"
@@ -241,11 +242,20 @@ void vfp_set_fpcr_to_host(CPUARMState* env, uint32_t val, uint32_t mask)
 
 #define VFP_HELPER(name, p) HELPER(glue(glue(vfp_, name), p))
 
-#define VFP_BINOP(name)                                                                                           \
-    dh_ctype_f16 VFP_HELPER(name, h)(dh_ctype_f16 a, dh_ctype_f16 b, float_status * fpst)                         \
-    { return float16_##name(a, b, fpst); }                                                                        \
-    float32 VFP_HELPER(name, s)(float32 a, float32 b, float_status * fpst) { return float32_##name(a, b, fpst); } \
-    float64 VFP_HELPER(name, d)(float64 a, float64 b, float_status * fpst) { return float64_##name(a, b, fpst); }
+/* Single and double precision run on the host FPU when native-fp allows (native-fp.h). */
+#define VFP_BINOP(name)                                                                   \
+    dh_ctype_f16 VFP_HELPER(name, h)(dh_ctype_f16 a, dh_ctype_f16 b, float_status * fpst) \
+    { return float16_##name(a, b, fpst); }                                                \
+    float32 VFP_HELPER(name, s)(float32 a, float32 b, float_status * fpst)                \
+    {                                                                                     \
+        NFP_RETURN_IF(arm_native_fp_ok(fpst), nfp_##name##_s(a, b));                      \
+        return float32_##name(a, b, fpst);                                                \
+    }                                                                                     \
+    float64 VFP_HELPER(name, d)(float64 a, float64 b, float_status * fpst)                \
+    {                                                                                     \
+        NFP_RETURN_IF(arm_native_fp_ok(fpst), nfp_##name##_d(a, b));                      \
+        return float64_##name(a, b, fpst);                                                \
+    }
 VFP_BINOP(add)
 VFP_BINOP(sub)
 VFP_BINOP(mul)
@@ -258,9 +268,17 @@ VFP_BINOP(maxnum)
 
 dh_ctype_f16 VFP_HELPER(sqrt, h)(dh_ctype_f16 a, float_status* fpst) { return float16_sqrt(a, fpst); }
 
-float32 VFP_HELPER(sqrt, s)(float32 a, float_status* fpst) { return float32_sqrt(a, fpst); }
+float32 VFP_HELPER(sqrt, s)(float32 a, float_status* fpst)
+{
+    NFP_RETURN_IF(arm_native_fp_ok(fpst), nfp_sqrt_s(a));
+    return float32_sqrt(a, fpst);
+}
 
-float64 VFP_HELPER(sqrt, d)(float64 a, float_status* fpst) { return float64_sqrt(a, fpst); }
+float64 VFP_HELPER(sqrt, d)(float64 a, float_status* fpst)
+{
+    NFP_RETURN_IF(arm_native_fp_ok(fpst), nfp_sqrt_d(a));
+    return float64_sqrt(a, fpst);
+}
 
 static void softfloat_to_vfp_compare(CPUARMState* env, FloatRelation cmp)
 {
@@ -314,9 +332,16 @@ DO_VFP_cmp(h, float16, dh_ctype_f16, FPST_A32_F16) DO_VFP_cmp(s, float32, float3
 
     /* floating point conversion */
     float64 VFP_HELPER(fcvtd, s)(float32 x, float_status* status)
-{ return float32_to_float64(x, status); }
+{
+    NFP_RETURN_IF(arm_native_fp_ok(status), nfp_fcvt_ds(x));
+    return float32_to_float64(x, status);
+}
 
-float32 VFP_HELPER(fcvts, d)(float64 x, float_status* status) { return float64_to_float32(x, status); }
+float32 VFP_HELPER(fcvts, d)(float64 x, float_status* status)
+{
+    NFP_RETURN_IF(arm_native_fp_ok(status), nfp_fcvt_sd(x));
+    return float64_to_float32(x, status);
+}
 
 uint32_t HELPER(bfcvt)(float32 x, float_status* status) { return float32_to_bfloat16(x, status); }
 
@@ -334,9 +359,12 @@ uint32_t HELPER(bfcvt_pair)(uint64_t pair, float_status* status)
  * round-to-nearest so either helper will work.) AArch32 float-to-fix
  * must round-to-zero.
  */
-#define VFP_CONV_FIX_FLOAT(name, p, fsz, ftype, isz, itype)                              \
+#define VFP_CONV_FIX_FLOAT(name, p, fsz, ftype, isz, itype, NITOF)                       \
     ftype HELPER(vfp_##name##to##p)(uint##isz##_t x, uint32_t shift, float_status* fpst) \
-    { return itype##_to_##float##fsz##_scalbn(x, -shift, fpst); }
+    {                                                                                    \
+        NITOF(name##to##p, x, shift, fpst);                                              \
+        return itype##_to_##float##fsz##_scalbn(x, -shift, fpst);                        \
+    }
 
 #define VFP_CONV_FIX_FLOAT_ROUND(name, p, fsz, ftype, isz, itype)                                           \
     ftype HELPER(vfp_##name##to##p##_round_to_nearest)(uint##isz##_t x, uint32_t shift, float_status* fpst) \
@@ -349,9 +377,10 @@ uint32_t HELPER(bfcvt_pair)(uint64_t pair, float_status* status)
         return ret;                                                                                         \
     }
 
-#define VFP_CONV_FLOAT_FIX_ROUND(name, p, fsz, ftype, isz, itype, ROUND, suff)               \
+#define VFP_CONV_FLOAT_FIX_ROUND(name, p, fsz, ftype, isz, itype, ROUND, suff, NTOI)         \
     uint##isz##_t HELPER(vfp_to##name##p##suff)(ftype x, uint32_t shift, float_status* fpst) \
     {                                                                                        \
+        NTOI(name##p, x, shift, fpst, uint##isz##_t);                                        \
         if (unlikely(float##fsz##_is_any_nan(x))) {                                          \
             float_raise(float_flag_invalid, fpst);                                           \
             return 0;                                                                        \
@@ -359,36 +388,41 @@ uint32_t HELPER(bfcvt_pair)(uint64_t pair, float_status* status)
         return float##fsz##_to_##itype##_scalbn(x, ROUND, shift, fpst);                      \
     }
 
-#define VFP_CONV_FIX(name, p, fsz, ftype, isz, itype)                                              \
-    VFP_CONV_FIX_FLOAT(name, p, fsz, ftype, isz, itype)                                            \
-    VFP_CONV_FIX_FLOAT_ROUND(name, p, fsz, ftype, isz, itype)                                      \
-    VFP_CONV_FLOAT_FIX_ROUND(name, p, fsz, ftype, isz, itype, float_round_to_zero, _round_to_zero) \
-    VFP_CONV_FLOAT_FIX_ROUND(name, p, fsz, ftype, isz, itype, get_float_rounding_mode(fpst), )
+/*
+ * NTOI/NITOF: native-fp attempts (native-fp.h) for the A64 conversions that
+ * have a single host instruction at fixed-point shift 0: FCVT{Z,N,A,P,M}{S,U}
+ * to W/X from single/double, and SCVTF/UCVTF from X to single/double.
+ */
+#define VFP_CONV_FIX(name, p, fsz, ftype, isz, itype, NTOI)                                                      \
+    VFP_CONV_FIX_FLOAT(name, p, fsz, ftype, isz, itype, NFP_ITOF_SKIP)                                           \
+    VFP_CONV_FIX_FLOAT_ROUND(name, p, fsz, ftype, isz, itype)                                                    \
+    VFP_CONV_FLOAT_FIX_ROUND(name, p, fsz, ftype, isz, itype, float_round_to_zero, _round_to_zero, NFP_TOI_SKIP) \
+    VFP_CONV_FLOAT_FIX_ROUND(name, p, fsz, ftype, isz, itype, get_float_rounding_mode(fpst), , NTOI)
 
-#define VFP_CONV_FIX_A64(name, p, fsz, ftype, isz, itype)                                      \
-    VFP_CONV_FIX_FLOAT(name, p, fsz, ftype, isz, itype)                                        \
-    VFP_CONV_FLOAT_FIX_ROUND(name, p, fsz, ftype, isz, itype, get_float_rounding_mode(fpst), )
+#define VFP_CONV_FIX_A64(name, p, fsz, ftype, isz, itype, NTOI, NITOF) \
+    VFP_CONV_FIX_FLOAT(name, p, fsz, ftype, isz, itype, NITOF)        \
+    VFP_CONV_FLOAT_FIX_ROUND(name, p, fsz, ftype, isz, itype, get_float_rounding_mode(fpst), , NTOI)
 
-VFP_CONV_FIX(sh, d, 64, float64, 64, int16)
-VFP_CONV_FIX(sl, d, 64, float64, 64, int32)
-VFP_CONV_FIX_A64(sq, d, 64, float64, 64, int64)
-VFP_CONV_FIX(uh, d, 64, float64, 64, uint16)
-VFP_CONV_FIX(ul, d, 64, float64, 64, uint32)
-VFP_CONV_FIX_A64(uq, d, 64, float64, 64, uint64)
-VFP_CONV_FIX(sh, s, 32, float32, 32, int16)
-VFP_CONV_FIX(sl, s, 32, float32, 32, int32)
-VFP_CONV_FIX_A64(sq, s, 32, float32, 64, int64)
-VFP_CONV_FIX(uh, s, 32, float32, 32, uint16)
-VFP_CONV_FIX(ul, s, 32, float32, 32, uint32)
-VFP_CONV_FIX_A64(uq, s, 32, float32, 64, uint64)
-VFP_CONV_FIX(sh, h, 16, dh_ctype_f16, 32, int16)
-VFP_CONV_FIX(sl, h, 16, dh_ctype_f16, 32, int32)
-VFP_CONV_FIX_A64(sq, h, 16, dh_ctype_f16, 64, int64)
-VFP_CONV_FIX(uh, h, 16, dh_ctype_f16, 32, uint16)
-VFP_CONV_FIX(ul, h, 16, dh_ctype_f16, 32, uint32)
-VFP_CONV_FIX_A64(uq, h, 16, dh_ctype_f16, 64, uint64)
-VFP_CONV_FLOAT_FIX_ROUND(sq, d, 64, float64, 64, int64, float_round_to_zero, _round_to_zero)
-VFP_CONV_FLOAT_FIX_ROUND(uq, d, 64, float64, 64, uint64, float_round_to_zero, _round_to_zero)
+VFP_CONV_FIX(sh, d, 64, float64, 64, int16, NFP_TOI_SKIP)
+VFP_CONV_FIX(sl, d, 64, float64, 64, int32, NFP_TOI_TRY)
+VFP_CONV_FIX_A64(sq, d, 64, float64, 64, int64, NFP_TOI_TRY, NFP_ITOF_TRY)
+VFP_CONV_FIX(uh, d, 64, float64, 64, uint16, NFP_TOI_SKIP)
+VFP_CONV_FIX(ul, d, 64, float64, 64, uint32, NFP_TOI_TRY)
+VFP_CONV_FIX_A64(uq, d, 64, float64, 64, uint64, NFP_TOI_TRY, NFP_ITOF_TRY)
+VFP_CONV_FIX(sh, s, 32, float32, 32, int16, NFP_TOI_SKIP)
+VFP_CONV_FIX(sl, s, 32, float32, 32, int32, NFP_TOI_TRY)
+VFP_CONV_FIX_A64(sq, s, 32, float32, 64, int64, NFP_TOI_TRY, NFP_ITOF_TRY)
+VFP_CONV_FIX(uh, s, 32, float32, 32, uint16, NFP_TOI_SKIP)
+VFP_CONV_FIX(ul, s, 32, float32, 32, uint32, NFP_TOI_TRY)
+VFP_CONV_FIX_A64(uq, s, 32, float32, 64, uint64, NFP_TOI_TRY, NFP_ITOF_TRY)
+VFP_CONV_FIX(sh, h, 16, dh_ctype_f16, 32, int16, NFP_TOI_SKIP)
+VFP_CONV_FIX(sl, h, 16, dh_ctype_f16, 32, int32, NFP_TOI_SKIP)
+VFP_CONV_FIX_A64(sq, h, 16, dh_ctype_f16, 64, int64, NFP_TOI_SKIP, NFP_ITOF_SKIP)
+VFP_CONV_FIX(uh, h, 16, dh_ctype_f16, 32, uint16, NFP_TOI_SKIP)
+VFP_CONV_FIX(ul, h, 16, dh_ctype_f16, 32, uint32, NFP_TOI_SKIP)
+VFP_CONV_FIX_A64(uq, h, 16, dh_ctype_f16, 64, uint64, NFP_TOI_SKIP, NFP_ITOF_SKIP)
+VFP_CONV_FLOAT_FIX_ROUND(sq, d, 64, float64, 64, int64, float_round_to_zero, _round_to_zero, NFP_TOI_SKIP)
+VFP_CONV_FLOAT_FIX_ROUND(uq, d, 64, float64, 64, uint64, float_round_to_zero, _round_to_zero, NFP_TOI_SKIP)
 
 #undef VFP_CONV_FIX
 #undef VFP_CONV_FIX_FLOAT
@@ -988,10 +1022,16 @@ dh_ctype_f16 VFP_HELPER(muladd, h)(dh_ctype_f16 a, dh_ctype_f16 b, dh_ctype_f16 
 { return float16_muladd(a, b, c, 0, fpst); }
 
 float32 VFP_HELPER(muladd, s)(float32 a, float32 b, float32 c, float_status* fpst)
-{ return float32_muladd(a, b, c, 0, fpst); }
+{
+    NFP_RETURN_IF(arm_native_fp_ok(fpst), nfp_muladd_s(a, b, c));
+    return float32_muladd(a, b, c, 0, fpst);
+}
 
 float64 VFP_HELPER(muladd, d)(float64 a, float64 b, float64 c, float_status* fpst)
-{ return float64_muladd(a, b, c, 0, fpst); }
+{
+    NFP_RETURN_IF(arm_native_fp_ok(fpst), nfp_muladd_d(a, b, c));
+    return float64_muladd(a, b, c, 0, fpst);
+}
 
 /* ARMv8 round to integral */
 dh_ctype_f16 HELPER(rinth_exact)(dh_ctype_f16 x, float_status* fp_status) { return float16_round_to_int(x, fp_status); }

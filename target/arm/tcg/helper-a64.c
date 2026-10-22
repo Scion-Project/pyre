@@ -38,6 +38,7 @@
 #include <zlib.h> /* for crc32 */
 #include "vec_internal.h"
 #include "WKdm.h"
+#include "native-fp.h"
 
 /* C2.4.7 Multiply and divide */
 /* special cases for 0 and LLONG_MIN are mandated by the standard */
@@ -116,16 +117,28 @@ uint64_t HELPER(vfp_cmpeh_a64)(uint32_t x, uint32_t y, float_status* fp_status)
 { return float_rel_to_flags(float16_compare(x, y, fp_status)); }
 
 uint64_t HELPER(vfp_cmps_a64)(float32 x, float32 y, float_status* fp_status)
-{ return float_rel_to_flags(float32_compare_quiet(x, y, fp_status)); }
+{
+    NFP_RETURN_IF(arm_native_fp_live(fp_status), nfp_cmp_s(x, y));
+    return float_rel_to_flags(float32_compare_quiet(x, y, fp_status));
+}
 
 uint64_t HELPER(vfp_cmpes_a64)(float32 x, float32 y, float_status* fp_status)
-{ return float_rel_to_flags(float32_compare(x, y, fp_status)); }
+{
+    NFP_RETURN_IF(arm_native_fp_live(fp_status), nfp_cmpe_s(x, y));
+    return float_rel_to_flags(float32_compare(x, y, fp_status));
+}
 
 uint64_t HELPER(vfp_cmpd_a64)(float64 x, float64 y, float_status* fp_status)
-{ return float_rel_to_flags(float64_compare_quiet(x, y, fp_status)); }
+{
+    NFP_RETURN_IF(arm_native_fp_live(fp_status), nfp_cmp_d(x, y));
+    return float_rel_to_flags(float64_compare_quiet(x, y, fp_status));
+}
 
 uint64_t HELPER(vfp_cmped_a64)(float64 x, float64 y, float_status* fp_status)
-{ return float_rel_to_flags(float64_compare(x, y, fp_status)); }
+{
+    NFP_RETURN_IF(arm_native_fp_live(fp_status), nfp_cmpe_d(x, y));
+    return float_rel_to_flags(float64_compare(x, y, fp_status));
+}
 
 float32 HELPER(vfp_mulxs)(float32 a, float32 b, float_status* fpst)
 {
