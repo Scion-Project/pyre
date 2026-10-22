@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include "qemu/osdep.h"
 #include "agx-uat.h"
 
 AgxUatResult agx_uat_walk(AgxUatRead64 read64, void* opaque, uint64_t ttb, uint64_t va, unsigned ias,
                           AgxUatWalk* out)
 {
-    uint64_t table = ttb & AGX_UAT_PTE_ADDR_MASK;
+    uint64_t table = ttb & AGX_UAT_TTBR_ADDR_MASK;
     uint64_t lva;
     int      level;
 

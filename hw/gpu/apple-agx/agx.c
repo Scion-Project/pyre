@@ -13,9 +13,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/gpu/apple-agx.h"
-#include "hw/irq.h"
 #include "hw/misc/a7iop/rtkit.h"
-#include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/bitmap.h"
 #include "qemu/log.h"

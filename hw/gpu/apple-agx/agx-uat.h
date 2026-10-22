@@ -31,6 +31,10 @@
 #define AGX_UAT_PTE_TABLE     (1ULL << 1)
 #define AGX_UAT_PTE_AF        (1ULL << 10)
 #define AGX_UAT_PTE_ADDR_MASK (0x000FFFFFFFFFC000ULL)
+/* TTBR: table base in [47:14], valid in bit 0, ASID from bit 48 up. */
+#define AGX_UAT_TTBR_ADDR_MASK (0x0000FFFFFFFFC000ULL)
+#define AGX_UAT_TTBR_VALID     (1ULL << 0)
+#define AGX_UAT_TTBR_ASID(_t)  ((_t) >> 48)
 
 /* Reads one 64-bit little-endian word of guest physical memory. */
 typedef bool (*AgxUatRead64)(void* opaque, uint64_t pa, uint64_t* val);
@@ -59,7 +63,7 @@ static inline bool agx_uat_va_in_range(uint64_t va, unsigned ias)
 }
 
 /*
- * Walk the table rooted at `ttb` (a physical address; low bits are masked)
+ * Walk the table rooted at `ttb` (a TTBR value: base, valid bit, ASID)
  * for `va`. Lower-half VAs belong to TTBR0, upper-half ones to TTBR1: the
  * caller picks which root to pass.
  */
