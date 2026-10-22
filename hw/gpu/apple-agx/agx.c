@@ -66,13 +66,13 @@ enum
 
 typedef struct
 {
-    MemoryRegion mr;
-    uint8_t*     regs;
-    uint64_t     size;
-    unsigned long* touched; /* one bit per 32-bit register: logged once */
-    hwaddr       window_off; /* offset of this region in the SGX window */
+    MemoryRegion          mr;
+    uint8_t*              regs;
+    uint64_t              size;
+    unsigned long*        touched;    /* one bit per 32-bit register: logged once */
+    hwaddr                window_off; /* offset of this region in the SGX window */
     struct AppleAGXState* agx;
-    int          index;
+    int                   index;
 } AppleAGXRegBank;
 
 struct AppleAGXStateClass
@@ -103,6 +103,7 @@ struct AppleAGXState
     hwaddr uat_ttbat;   /* context TTBR table */
     hwaddr uat_handoff; /* AP/firmware page-table handoff */
 
+    uint64_t asc_wrap_reg;
     uint64_t initdata_va;
     bool     fw_inited;
 };
@@ -114,13 +115,11 @@ OBJECT_DEFINE_TYPE(AppleAGXState, apple_agx, APPLE_AGX, APPLE_RTKIT)
 
 static uint64_t agx_sgx_read(void* opaque, hwaddr addr, unsigned size)
 {
-    AppleAGXRegBank* b = opaque;
+    AppleAGXRegBank* b   = opaque;
     uint64_t         val = 0;
 
     memcpy(&val, b->regs + addr, size);
-    if (!test_and_set_bit(addr >> 2, b->touched)) {
-        trace_apple_agx_sgx_read(b->window_off + addr, val, size);
-    }
+    if (!test_and_set_bit(addr >> 2, b->touched)) { trace_apple_agx_sgx_read(b->window_off + addr, val, size); }
     return val;
 }
 
@@ -142,15 +141,24 @@ static const MemoryRegionOps agx_sgx_ops = {
     .impl.max_access_size  = 8,
 };
 
+/*
+ * The ASC wrapper (gfx-asc reg[1]) is one 64-bit register. RTBuddy reads
+ * it, then writes the nub's firmware region base | 1 (bit 0: enable).
+ */
 static uint64_t agx_asc_wrap_read(void* opaque, hwaddr addr, unsigned size)
 {
+    AppleAGXState* s = opaque;
+
     trace_apple_agx_asc_wrap_read(addr, size);
-    return 0;
+    return addr == 0 ? s->asc_wrap_reg : 0;
 }
 
 static void agx_asc_wrap_write(void* opaque, hwaddr addr, uint64_t val, unsigned size)
 {
+    AppleAGXState* s = opaque;
+
     trace_apple_agx_asc_wrap_write(addr, val, size);
+    if (addr == 0) { s->asc_wrap_reg = size == 8 ? val : deposit64(s->asc_wrap_reg, 0, 32, val); }
 }
 
 static const MemoryRegionOps agx_asc_wrap_ops = {
@@ -167,19 +175,112 @@ static const MemoryRegionOps agx_asc_wrap_ops = {
 /* Firmware endpoints. */
 
 /*
- * M0 status / M1 handoff (observed on the iOS 14.8 / 18H17 research build):
- * the AGXAcceleratorG12P_B0 personality matches and starts, reads the sgx
- * ID registers above, and the device-tree/UAT/PPL gating is satisfied, so
- * the boot reaches "waiting for host". AGXFirmware config setup then runs
- * BEFORE any mailbox traffic: it allocates an AGXFirmware/GART object
- * (stored at accelerator+0x3a0) and an init on it currently fails, so the
- * driver releases the half-built object, whose destructor calls
- * lck_mtx_destroy on an uninitialised mutex ("Destroying invalid mutex").
- * Hence agx_ep_firmware/agx_ep_doorbell below are not reached yet: the
- * driver never sends MSG_INIT. Finishing M0 means answering that GART/
- * AGXFirmware bring-up (likely initdata/UAT-layout dependent) so the
- * driver proceeds to the EP_FIRMWARE handshake these handlers implement.
+ * Bring-up sequence observed from QEMU's side (iOS 14.8 / 18H17 research
+ * build; docs/GPU-M0-NOTES.md has the traces):
+ *
+ *  1. The accelerator reads the sgx ID registers and pokes sgx
+ *     +0xd08000..0xd08024, then waits (with a ~2.5 s timeout that ends in
+ *     "Destroying invalid mutex") for the gfx-asc RTBuddy. That needs the
+ *     ASC's `iommu-parent`, mapper-gfx-asc (AGXArmFirmwareMapper), to be
+ *     in the device tree (hw/arm/boot.c).
+ *  2. RTBuddy(GFX) resumes the "pre-loaded" firmware only if the nub has a
+ *     firmware region (region-base/-size, hw/arm/t8030.c); otherwise it
+ *     tries to load one and panics in _attemptFirmwareLoad. It writes
+ *     region-base | 1 to the 8-byte ASC wrapper register (reg[1]).
+ *  3. RTKit management handshake (HELLO, EPMAP, rollcall, power state),
+ *     then the driver starts EP 0x20 and 0x21 and sends one MSG_INIT on
+ *     EP 0x20 carrying the initdata pointer. That is all the mailbox
+ *     traffic in a restore boot: no doorbell, no FWCtl, and every channel
+ *     ring stays empty for minutes afterwards. The driver does not wait
+ *     for a reply to MSG_INIT (as on G13, the firmware does not send one).
  */
+/* ------------------------------------------------------------------ */
+/* GPU virtual memory, as the firmware sees it through the UAT. */
+
+/*
+ * GPU VA width. Kernel (firmware-shared) objects live in the upper half:
+ * MSG_INIT carries a 44-bit pointer that sign-extends to 0xffffffa0_00000000
+ * and up, the same kernel IOVA base drm/asahi uses on G13.
+ */
+#define AGX_UAT_IAS     (39)
+#define AGX_MSG_VA_BITS (44)
+
+static bool agx_read64_pa(void* opaque, uint64_t pa, uint64_t* val)
+{
+    MemTxResult r = address_space_read(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED, val, sizeof(*val));
+
+    *val = le64_to_cpu(*val);
+    return r == MEMTX_OK;
+}
+
+static uint64_t agx_msg_va(uint64_t va) { return sextract64(va, 0, AGX_MSG_VA_BITS); }
+
+/* Translate a GPU VA. Upper-half VAs use the shared kernel-half L1 table. */
+static bool agx_translate(AppleAGXState* s, uint64_t va, uint64_t* pa)
+{
+    AgxUatWalk   w = {0};
+    AgxUatResult r;
+    uint64_t     ttb;
+
+    if ((int64_t)va < 0) { ttb = s->uat_shared | AGX_UAT_TTBR_VALID; }
+    else {
+        /* Context 0's TTBR0, first entry of the TTBAT. */
+        if (!agx_read64_pa(NULL, s->uat_ttbat, &ttb)) { return false; }
+    }
+    r = agx_uat_walk(agx_read64_pa, NULL, ttb, va, AGX_UAT_IAS, &w);
+    trace_apple_agx_uat_walk(va, r, w.level, w.pte, r == AGX_UAT_OK ? w.pa : 0);
+    if (r != AGX_UAT_OK) { return false; }
+    *pa = w.pa;
+    return true;
+}
+
+static bool agx_gpu_read(AppleAGXState* s, uint64_t va, void* buf, size_t len)
+{
+    uint8_t* p = buf;
+
+    while (len > 0) {
+        uint64_t pa;
+        size_t   n = MIN(len, AGX_UAT_PGSZ - (va & (AGX_UAT_PGSZ - 1)));
+
+        if (!agx_translate(s, va, &pa)) { return false; }
+        if (address_space_read(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED, p, n) != MEMTX_OK) { return false; }
+        va  += n;
+        p   += n;
+        len -= n;
+    }
+    return true;
+}
+
+/*
+ * initdata, as built by the iOS 14.8 G12P driver, has the same top-level
+ * layout as m1n1's G13 InitData (fw/agx/initdata.py):
+ *   +0x00 regionA VA        +0x10 regionB VA     +0x18 regionC VA
+ *   +0x20 fw_status VA      +0x28 u16 UAT page size (0x4000), u8 page bits
+ *   (14), u8 levels (3), then three 0x20-byte level descriptors at +0x2c:
+ *   u8 8, u8 14, u8 14, u8 index shift (36, 25, 14), u16 entries (8, 2048,
+ *   2048), u16 table size (0x4000), u64 1, u64 PA mask (0xffffffc000),
+ *   u64 index mask; +0xa0 u32 host_mapped_fw_allocations (1).
+ * regionB +0x000..0x110 is 17 (state VA, ring VA) channel pairs in m1n1's
+ * order (TA/3D/CL x4, DevCtrl, Event, FWLog, KTrace, Stats), then the
+ * stats/hwdata pointers from +0x170 (hwdata_b repeated at +0x1a0/+0x1a8).
+ * fw_status +0x00 is the FWCtl channel (state, ring) pair, pointing into
+ * fw_status itself (+0x80, +0xc0). regionA's first 0x100 bytes are zero.
+ */
+
+/* Log the start of a firmware-shared structure, one 64-bit word per line. */
+static void agx_dump(AppleAGXState* s, const char* what, uint64_t va, size_t len)
+{
+    g_autofree uint64_t* buf = g_malloc0(len);
+
+    if (!agx_gpu_read(s, va, buf, len)) {
+        trace_apple_agx_dump_fault(what, va);
+        return;
+    }
+    for (size_t i = 0; i < len / 8; i++) {
+        if (buf[i] != 0) { trace_apple_agx_dump(what, va, i * 8, le64_to_cpu(buf[i])); }
+    }
+}
+
 static void agx_ep_firmware(void* opaque, uint8_t ep, uint64_t msg)
 {
     AppleAGXState* s = opaque;
@@ -187,16 +288,52 @@ static void agx_ep_firmware(void* opaque, uint8_t ep, uint64_t msg)
     trace_apple_agx_ep_msg(ep + RTKIT_EP_USER_START, msg);
     switch (AGX_MSG_TYPE(msg)) {
         case AGX_MSG_INIT:
-            s->initdata_va = AGX_MSG_INIT_DATA(msg);
+            s->initdata_va = agx_msg_va(AGX_MSG_INIT_DATA(msg));
             s->fw_inited   = true;
+            if (trace_event_get_state_backends(TRACE_APPLE_AGX_DUMP)) {
+                uint64_t ttbat[4] = {0};
+                address_space_read(&address_space_memory, s->uat_ttbat, MEMTXATTRS_UNSPECIFIED, ttbat, sizeof(ttbat));
+                for (int i = 0; i < 4; i++) { trace_apple_agx_dump("ttbat", s->uat_ttbat, i * 8, ttbat[i]); }
+                uint64_t hdr[5] = {0};
+                agx_dump(s, "initdata", s->initdata_va, 0x200);
+                if (agx_gpu_read(s, s->initdata_va, hdr, sizeof(hdr))) {
+                    agx_dump(s, "regionA", le64_to_cpu(hdr[0]), 0x100);
+                    agx_dump(s, "regionB", le64_to_cpu(hdr[2]), 0x200);
+                    agx_dump(s, "regionC", le64_to_cpu(hdr[3]), 0x100);
+                    agx_dump(s, "fw_status", le64_to_cpu(hdr[4]), 0x100);
+                }
+            }
             break;
         default: break;
     }
 }
 
+/*
+ * Doorbells (EP 0x21). None are rung in a restore boot, so this only logs
+ * them; for DOORBELL_DEVCTRL it also logs the DevCtrl ring's pointers (the
+ * driver writes WRITE_PTR at state +0x20, the firmware READ_PTR at +0x0).
+ */
+#define AGX_DOORBELL_KICKFW    (0x10)
+#define AGX_DOORBELL_DEVCTRL   (0x11)
+#define AGX_REGIONB_CH_DEVCTRL (12)
+
 static void agx_ep_doorbell(void* opaque, uint8_t ep, uint64_t msg)
 {
+    AppleAGXState* s = opaque;
+    uint64_t       hdr[3];
+    uint64_t       state_va;
+    uint32_t       rd = 0, wr = 0;
+
     trace_apple_agx_ep_msg(ep + RTKIT_EP_USER_START, msg);
+    if (!s->fw_inited || AGX_MSG_TYPE(msg) != AGX_MSG_TX_DOORBELL || (msg & 0xff) != AGX_DOORBELL_DEVCTRL) { return; }
+    if (agx_gpu_read(s, s->initdata_va, hdr, sizeof(hdr))
+        && agx_gpu_read(s, le64_to_cpu(hdr[2]) + AGX_REGIONB_CH_DEVCTRL * 16, &state_va, 8))
+    {
+        state_va = le64_to_cpu(state_va);
+        agx_gpu_read(s, state_va, &rd, 4);
+        agx_gpu_read(s, state_va + 0x20, &wr, 4);
+    }
+    trace_apple_agx_devctrl(le32_to_cpu(rd), le32_to_cpu(wr));
 }
 
 static void agx_boot_done(void* opaque) { trace_apple_agx_boot_done(); }
@@ -292,7 +429,7 @@ static void agx_sgx_preset(AppleAGXState* s, hwaddr off, uint32_t val)
 
 static void apple_agx_reset_hold(Object* obj, ResetType type)
 {
-    AppleAGXState* s  = APPLE_AGX(obj);
+    AppleAGXState*      s  = APPLE_AGX(obj);
     AppleAGXStateClass* ac = APPLE_AGX_GET_CLASS(obj);
 
     if (ac->parent_phases.hold != NULL) { ac->parent_phases.hold(obj, type); }
@@ -310,8 +447,9 @@ static void apple_agx_reset_hold(Object* obj, ResetType type)
     agx_sgx_preset(s, SGX_CORE_MASK_0, s->core_mask_0);
     agx_sgx_preset(s, SGX_CORE_MASK_1, s->core_mask_1);
 
-    s->initdata_va = 0;
-    s->fw_inited   = false;
+    s->asc_wrap_reg = 0;
+    s->initdata_va  = 0;
+    s->fw_inited    = false;
 }
 
 /*
@@ -335,9 +473,9 @@ static void apple_agx_finalize(Object* obj) { }
 
 static void apple_agx_class_init(ObjectClass* klass, const void* data)
 {
-    ResettableClass* rc = RESETTABLE_CLASS(klass);
-    DeviceClass*     dc = DEVICE_CLASS(klass);
-    AppleAGXStateClass*   ac = APPLE_AGX_CLASS(klass);
+    ResettableClass*    rc = RESETTABLE_CLASS(klass);
+    DeviceClass*        dc = DEVICE_CLASS(klass);
+    AppleAGXStateClass* ac = APPLE_AGX_CLASS(klass);
 
     resettable_class_set_parent_phases(rc, NULL, apple_agx_reset_hold, NULL, &ac->parent_phases);
     dc->desc = "Apple AGX GPU (firmware HLE)";

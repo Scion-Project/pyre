@@ -8,3 +8,7 @@ apple_agx_asc_wrap_write(uint64_t off, uint64_t val, unsigned size) "asc-wrap +0
 apple_agx_ep_msg(unsigned ep, uint64_t msg) "ep 0x%x msg 0x%016" PRIx64
 apple_agx_boot_done(void) "RTKit management handshake done"
 apple_agx_uat_regions(uint64_t shared, uint64_t ttbat, uint64_t handoff) "UAT regions: TTBR1 L1 0x%" PRIx64 " TTBAT 0x%" PRIx64 " handoff 0x%" PRIx64
+apple_agx_uat_walk(uint64_t va, int res, int level, uint64_t pte, uint64_t pa) "UAT va 0x%" PRIx64 " -> res %d level %d pte 0x%" PRIx64 " pa 0x%" PRIx64
+apple_agx_dump(const char* what, uint64_t va, uint64_t off, uint64_t val) "%s 0x%" PRIx64 " +0x%03" PRIx64 ": 0x%016" PRIx64
+apple_agx_dump_fault(const char* what, uint64_t va) "%s 0x%" PRIx64 ": unmapped"
+apple_agx_devctrl(uint32_t rd, uint32_t wr) "DevCtrl doorbell: read_ptr %u write_ptr %u"
