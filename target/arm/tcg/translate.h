@@ -153,6 +153,15 @@ typedef struct DisasContext
     /* True if covered FP ops may be emitted as host FP instructions (native-fp.h) */
     bool native_fp;
     /*
+     * Same-ISA translation (native-int, tcg/tcg-sit.h): covered insns may be
+     * emitted as host insns in this TB; a SIT region is open; inside it the
+     * guest NZCV is in the host flags; the current insn was emitted as SIT.
+     */
+    bool sit;
+    bool sit_open;
+    bool sit_nzcv;
+    bool sit_done;
+    /*
      * >= 0, a copy of PSTATE.BTYPE, which will be 0 without v8.5-BTI.
      *  < 0, set by the current instruction.
      */

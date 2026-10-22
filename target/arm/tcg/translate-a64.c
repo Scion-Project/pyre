@@ -25,6 +25,8 @@
 #include "arm_ldst.h"
 #include "cpregs.h"
 #include "native-fp.h"
+#include "accel/tcg/native-int.h"
+#include "tcg/tcg-sit.h"
 
 static TCGv_i64 cpu_X[32];
 static TCGv_i64 cpu_pc;
@@ -425,6 +427,149 @@ static void gen_goto_tb(DisasContext* s, int n, int64_t diff)
             s->base.is_jmp = DISAS_NORETURN;
         }
     }
+}
+
+/*
+ * Same-ISA translation (-accel tcg,native-int=on, docs/NATIVE-INT.md).
+ *
+ * On an AArch64 host, covered guest instructions are emitted as SIT ops
+ * (tcg/tcg-sit.h) instead of TCG ops: the backend emits the same host
+ * instruction with the guest registers renamed to host registers. A run
+ * of SIT ops forms a region (sit_enter ... sit_exit); any instruction
+ * translated with TCG ops ends the region first (aarch64_tr_translate_insn
+ * inserts the sit_exit after its insn_start). The sit_* hooks below are
+ * called from the trans_* functions once the encoding is known to be valid;
+ * they return false (and emit nothing) when the instruction must take the
+ * TCG path.
+ */
+static const SitLayout a64_sit_layout = {
+    .xregs = offsetof(CPUARMState, xregs),
+    .pc    = offsetof(CPUARMState, pc),
+    .cf    = offsetof(CPUARMState, CF),
+    .vf    = offsetof(CPUARMState, VF),
+    .nf    = offsetof(CPUARMState, NF),
+    .zf    = offsetof(CPUARMState, ZF),
+};
+
+/* sit_copy() field uses: SIT_USE_R/W, and whether register 31 is SP (else XZR). */
+#define SIT_R  SIT_USE_R
+#define SIT_W  SIT_USE_W
+#define SIT_RW (SIT_USE_R | SIT_USE_W)
+#define SIT_SP 4
+
+static SitInsn* sit_new(DisasContext* s, SitKind kind)
+{
+    SitInsn* si = tcg_malloc(sizeof(*si));
+
+    memset(si, 0, sizeof(*si));
+    si->insn = s->insn;
+    si->kind = kind;
+    return si;
+}
+
+/* May this insn be emitted as SIT? @nzcv: whether it reads the guest flags. */
+static bool sit_admit(DisasContext* s, unsigned nzcv)
+{
+    if (!s->sit) { return false; }
+    /* Outside a region the flags are in the CPU state: TCG reads them as cheaply. */
+    if ((nzcv & SIT_NZCV_R) && !s->sit_open) { return false; }
+    return true;
+}
+
+static void sit_emit(DisasContext* s, SitInsn* si)
+{
+    if (!s->sit_open) {
+        tcg_gen_sit_enter(&a64_sit_layout);
+        s->sit_open = true;
+        s->sit_nzcv = false;
+    }
+    if (si->nzcv) { s->sit_nzcv = true; }
+    tcg_gen_sit(si);
+    s->sit_done = true;
+}
+
+static inline uint8_t sit_reg(int r, bool sp) { return r == 31 && !sp ? SIT_REG_ZR : r; }
+
+/*
+ * A data-processing insn whose register fields are Rd (bits 0-4), Rn (5-9),
+ * Rm (16-20) and Ra (10-14), each used as @d, @n, @m, @a (0: not a register).
+ */
+static bool sit_copy(DisasContext* s, unsigned nzcv, unsigned d, unsigned n, unsigned m, unsigned a)
+{
+    static const uint8_t pos[4] = {0, 5, 16, 10};
+    unsigned             use[4] = {d, n, m, a};
+    SitInsn*             si;
+
+    if (!sit_admit(s, nzcv)) { return false; }
+    si       = sit_new(s, SIT_COPY);
+    si->nzcv = nzcv;
+    for (int i = 0; i < 4; i++) {
+        if (use[i]) {
+            si->f[si->nfield++] = (SitField){
+                .shift = pos[i],
+                .reg   = sit_reg(extract32(s->insn, pos[i], 5), use[i] & SIT_SP),
+                .use   = use[i] & (SIT_USE_R | SIT_USE_W),
+            };
+        }
+    }
+    sit_emit(s, si);
+    return true;
+}
+
+/* ADR/ADRP: rd = pc_curr + diff. */
+static bool sit_addpc(DisasContext* s, int rd, int64_t diff)
+{
+    SitInsn* si;
+
+    if (!sit_admit(s, 0) || s->pc_save == -1) { return false; }
+    si     = sit_new(s, SIT_ADDPC);
+    si->rt = sit_reg(rd, false);
+    if (tb_cflags(s->base.tb) & CF_PCREL) {
+        si->pcrel = true;
+        si->imm   = (s->pc_curr - s->pc_save) + diff;
+    }
+    else {
+        si->imm = s->pc_curr + diff;
+    }
+    sit_emit(s, si);
+    return true;
+}
+
+/*
+ * A load or store of one or two general-purpose registers. @rt, @rt2 and
+ * @rm are XZR when 31, @rn is SP. Returns false for the cases the
+ * architecture leaves CONSTRAINED UNPREDICTABLE (the host might UNDEF).
+ */
+static SitInsn* sit_ldst(DisasContext* s, SitKind kind, int rt, int rt2, int rn, SitAddrMode mode, int64_t imm,
+                         int size, SitLoadExt ext, MemOp mop)
+{
+    bool     wb = mode == SIT_AM_PRE || mode == SIT_AM_POST;
+    bool     pair = kind == SIT_LDP || kind == SIT_STP;
+    SitInsn* si;
+
+    if (!sit_admit(s, 0) || !tcg_native_int_ldst) { return NULL; }
+    if (wb && rn != 31 && (rn == rt || (pair && rn == rt2))) { return NULL; }
+    if (kind == SIT_LDP && rt == rt2) { return NULL; }
+    si       = sit_new(s, kind);
+    si->rt   = sit_reg(rt, false);
+    si->rt2  = pair ? sit_reg(rt2, false) : SIT_REG_ZR;
+    si->rn   = rn;
+    si->rm   = SIT_REG_ZR;
+    si->mode = mode;
+    si->imm  = imm;
+    si->size = size;
+    si->ext  = ext;
+    si->oi   = make_memop_idx(mop, get_mem_index(s));
+    sit_emit(s, si);
+    return si;
+}
+
+/* A conditional branch to @l (taken path): ends the region. */
+static void sit_brcond(DisasContext* s, SitInsn* si, TCGLabel* l)
+{
+    tcg_gen_sit_brcond(si, l);
+    s->sit_open = false;
+    s->sit_done = true;
 }
 
 /*
@@ -1378,6 +1523,19 @@ static bool trans_CBZ(DisasContext* s, arg_cbz* a)
     DisasLabel match;
     TCGv_i64   tcg_cmp;
 
+    if (s->sit_open) {
+        SitInsn* si = sit_new(s, SIT_CBZ);
+
+        si->rt   = sit_reg(a->rt, false);
+        si->cond = a->nz;
+        si->bit  = a->sf;
+        match    = gen_disas_label(s);
+        sit_brcond(s, si, match.label);
+        gen_goto_tb(s, 0, 4);
+        set_disas_label(s, match);
+        gen_goto_tb(s, 1, a->imm);
+        return true;
+    }
     tcg_cmp = read_cpu_reg(s, a->rt, a->sf);
     reset_btype(s);
 
@@ -1394,6 +1552,19 @@ static bool trans_TBZ(DisasContext* s, arg_tbz* a)
     DisasLabel match;
     TCGv_i64   tcg_cmp;
 
+    if (s->sit_open) {
+        SitInsn* si = sit_new(s, SIT_TBZ);
+
+        si->rt   = sit_reg(a->rt, false);
+        si->cond = a->nz;
+        si->bit  = a->bitpos;
+        match    = gen_disas_label(s);
+        sit_brcond(s, si, match.label);
+        gen_goto_tb(s, 0, 4);
+        set_disas_label(s, match);
+        gen_goto_tb(s, 1, a->imm);
+        return true;
+    }
     tcg_cmp = tcg_temp_new_i64();
     tcg_gen_andi_i64(tcg_cmp, cpu_reg(s, a->rt), 1ULL << a->bitpos);
 
@@ -1412,7 +1583,18 @@ static bool trans_B_cond(DisasContext* s, arg_B_cond* a)
     /* BC.cond is only present with FEAT_HBC */
     if (a->c && !dc_isar_feature(aa64_hbc, s)) { return false; }
     reset_btype(s);
-    if (a->cond < 0x0e) {
+    if (a->cond < 0x0e && s->sit_open && s->sit_nzcv) {
+        /* The guest flags are in the host flags: branch on them. */
+        DisasLabel match = gen_disas_label(s);
+        SitInsn*   si    = sit_new(s, SIT_BCOND);
+
+        si->cond = a->cond;
+        sit_brcond(s, si, match.label);
+        gen_goto_tb(s, 0, 4);
+        set_disas_label(s, match);
+        gen_goto_tb(s, 1, a->imm);
+    }
+    else if (a->cond < 0x0e) {
         /* genuinely conditional branches */
         DisasLabel match = gen_disas_label(s);
         arm_gen_test_cc(a->cond, match.label);
@@ -2751,6 +2933,38 @@ static bool ldst_iss_sf(int size, bool sign, bool ext)
     }
 }
 
+/* Native-int loads and stores (sit_ldst) */
+static SitAddrMode sit_mode(bool p, bool w) { return !w ? SIT_AM_OFF : p ? SIT_AM_POST : SIT_AM_PRE; }
+
+static SitLoadExt sit_ldext(bool sign, bool ext) { return !sign ? SIT_LD_ZEXT : ext ? SIT_LD_SEXTW : SIT_LD_SEXT; }
+
+/* The data abort syndrome of a single-register load or store, as do_gpr_ld/do_gpr_st set it. */
+static void sit_syndrome(DisasContext* s, MemOp mop, bool is_load, int rt, bool iss_sf)
+{
+    disas_set_insn_syndrome(s, syn_data_abort_with_iss(0, mop & MO_SIZE, is_load && (mop & MO_SIGN), rt, iss_sf, false,
+                                                       0, 0, 0, 0, 0, false));
+}
+
+/* The memop of a LDP/STP of two registers of 1 << sz bytes, as trans_LDP/trans_STP build it. */
+static MemOp sit_pair_memop(DisasContext* s, int sz)
+{
+    MemOp mop = sz + 1;
+
+    if (s->align_mem) { mop |= (sz == 2 ? MO_ALIGN_4 : MO_ALIGN_8); }
+    return finalize_memop_pair(s, mop);
+}
+
+static bool sit_ldst_reg(DisasContext* s, SitKind kind, arg_ldst* a, SitLoadExt ext, MemOp mop)
+{
+    SitInsn* si = sit_ldst(s, kind, a->rt, 0, a->rn, SIT_AM_REG, 0, a->sz, ext, mop);
+
+    if (!si) { return false; }
+    si->rm        = sit_reg(a->rm, false);
+    si->ext_opt   = a->opt;
+    si->ext_shift = a->s ? a->sz : 0;
+    return true;
+}
+
 static bool trans_STXR(DisasContext* s, arg_stxr* a)
 {
     if (a->rn == 31) { gen_check_sp_alignment(s); }
@@ -2887,6 +3101,11 @@ static bool trans_STP(DisasContext* s, arg_ldstpair* a)
     TCGv_i64 clean_addr, dirty_addr, tcg_rt, tcg_rt2;
     MemOp    mop = finalize_memop(s, a->sz);
 
+    if (sit_ldst(s, SIT_STP, a->rt, a->rt2, a->rn, sit_mode(a->p, a->w), offset, a->sz, SIT_LD_ZEXT,
+                 sit_pair_memop(s, a->sz))) {
+        return true;
+    }
+
     op_addr_ldstpair_pre(s, a, &clean_addr, &dirty_addr, offset, true, mop);
     tcg_rt  = cpu_reg(s, a->rt);
     tcg_rt2 = cpu_reg(s, a->rt2);
@@ -2930,6 +3149,11 @@ static bool trans_LDP(DisasContext* s, arg_ldstpair* a)
     uint64_t offset = a->imm << a->sz;
     TCGv_i64 clean_addr, dirty_addr, tcg_rt, tcg_rt2;
     MemOp    mop = finalize_memop(s, a->sz);
+
+    if (sit_ldst(s, SIT_LDP, a->rt, a->rt2, a->rn, sit_mode(a->p, a->w), offset, a->sz,
+                 a->sign ? SIT_LD_SEXT : SIT_LD_ZEXT, sit_pair_memop(s, a->sz))) {
+        return true;
+    }
 
     op_addr_ldstpair_pre(s, a, &clean_addr, &dirty_addr, offset, false, mop);
     tcg_rt  = cpu_reg(s, a->rt);
@@ -3089,6 +3313,11 @@ static bool trans_STR_i(DisasContext* s, arg_ldst_imm* a)
     int      memidx = get_a64_user_mem_index(s, a->unpriv);
     MemOp    mop    = finalize_memop(s, a->sz + a->sign * MO_SIGN);
 
+    if (!a->unpriv && sit_ldst(s, SIT_ST, a->rt, 0, a->rn, sit_mode(a->p, a->w), a->imm, a->sz, SIT_LD_ZEXT, mop)) {
+        if (iss_valid) { sit_syndrome(s, mop, false, a->rt, ldst_iss_sf(a->sz, a->sign, a->ext)); }
+        return true;
+    }
+
     op_addr_ldst_imm_pre(s, a, &clean_addr, &dirty_addr, a->imm, true, mop);
 
     tcg_rt = cpu_reg(s, a->rt);
@@ -3105,6 +3334,12 @@ static bool trans_LDR_i(DisasContext* s, arg_ldst_imm* a)
     TCGv_i64 clean_addr, dirty_addr, tcg_rt;
     int      memidx = get_a64_user_mem_index(s, a->unpriv);
     MemOp    mop    = finalize_memop(s, a->sz + a->sign * MO_SIGN);
+
+    if (!a->unpriv && sit_ldst(s, SIT_LD, a->rt, 0, a->rn, sit_mode(a->p, a->w), a->imm, a->sz, sit_ldext(a->sign, a->ext),
+                               mop)) {
+        if (iss_valid) { sit_syndrome(s, mop, true, a->rt, ldst_iss_sf(a->sz, a->sign, a->ext)); }
+        return true;
+    }
 
     op_addr_ldst_imm_pre(s, a, &clean_addr, &dirty_addr, a->imm, false, mop);
 
@@ -3166,6 +3401,10 @@ static bool trans_LDR(DisasContext* s, arg_ldst* a)
     if (extract32(a->opt, 1, 1) == 0) { return false; }
 
     memop = finalize_memop(s, a->sz + a->sign * MO_SIGN);
+    if (sit_ldst_reg(s, SIT_LD, a, sit_ldext(a->sign, a->ext), memop)) {
+        sit_syndrome(s, memop, true, a->rt, iss_sf);
+        return true;
+    }
     op_addr_ldst_pre(s, a, &clean_addr, &dirty_addr, false, memop);
     tcg_rt = cpu_reg(s, a->rt);
     do_gpr_ld(s, tcg_rt, clean_addr, memop, a->ext, true, a->rt, iss_sf, false);
@@ -3181,6 +3420,10 @@ static bool trans_STR(DisasContext* s, arg_ldst* a)
     if (extract32(a->opt, 1, 1) == 0) { return false; }
 
     memop = finalize_memop(s, a->sz);
+    if (sit_ldst_reg(s, SIT_ST, a, SIT_LD_ZEXT, memop)) {
+        sit_syndrome(s, memop, false, a->rt, iss_sf);
+        return true;
+    }
     op_addr_ldst_pre(s, a, &clean_addr, &dirty_addr, true, memop);
     tcg_rt = cpu_reg(s, a->rt);
     do_gpr_st(s, tcg_rt, clean_addr, memop, true, a->rt, iss_sf, false);
@@ -3933,6 +4176,12 @@ typedef void ArithTwoOp(TCGv_i64, TCGv_i64, TCGv_i64);
 
 static bool gen_rri(DisasContext* s, arg_rri_sf* a, bool rd_sp, bool rn_sp, ArithTwoOp* fn)
 {
+    /* ADD/SUB(S) (immediate): bit 29 is S */
+    if (sit_copy(s, extract32(s->insn, 29, 1) ? SIT_NZCV_W : 0, SIT_W | (rd_sp ? SIT_SP : 0),
+                 SIT_R | (rn_sp ? SIT_SP : 0), 0, 0)) {
+        return true;
+    }
+
     TCGv_i64 tcg_rn  = rn_sp ? cpu_reg_sp(s, a->rn) : cpu_reg(s, a->rn);
     TCGv_i64 tcg_rd  = rd_sp ? cpu_reg_sp(s, a->rd) : cpu_reg(s, a->rd);
     TCGv_i64 tcg_imm = tcg_constant_i64(a->imm);
@@ -3948,6 +4197,7 @@ static bool gen_rri(DisasContext* s, arg_rri_sf* a, bool rd_sp, bool rn_sp, Arit
 
 static bool trans_ADR(DisasContext* s, arg_ri* a)
 {
+    if (sit_addpc(s, a->rd, a->imm)) { return true; }
     gen_pc_plus_diff(s, cpu_reg(s, a->rd), a->imm);
     return true;
 }
@@ -3958,6 +4208,7 @@ static bool trans_ADRP(DisasContext* s, arg_ri* a)
 
     /* The page offset is ok for CF_PCREL. */
     offset -= s->pc_curr & 0xfff;
+    if (sit_addpc(s, a->rd, offset)) { return true; }
     gen_pc_plus_diff(s, cpu_reg(s, a->rd), offset);
     return true;
 }
@@ -4090,6 +4341,7 @@ static bool gen_rri_log(DisasContext* s, arg_rri_log* a, bool set_cc, void (*fn)
         return false;
     }
     if (!a->sf) { imm &= 0xffffffffull; }
+    if (sit_copy(s, set_cc ? SIT_NZCV_W : 0, SIT_W | (set_cc ? 0 : SIT_SP), SIT_R, 0, 0)) { return true; }
 
     tcg_rd = set_cc ? cpu_reg(s, a->rd) : cpu_reg_sp(s, a->rd);
     tcg_rn = cpu_reg(s, a->rn);
@@ -4111,6 +4363,7 @@ TRANS(ANDS_i, gen_rri_log, a, true, tcg_gen_andi_i64)
 
 static bool trans_MOVZ(DisasContext* s, arg_movw* a)
 {
+    if (sit_copy(s, 0, SIT_W, 0, 0, 0)) { return true; }
     int pos = a->hw << 4;
     tcg_gen_movi_i64(cpu_reg(s, a->rd), (uint64_t)a->imm << pos);
     return true;
@@ -4118,6 +4371,7 @@ static bool trans_MOVZ(DisasContext* s, arg_movw* a)
 
 static bool trans_MOVN(DisasContext* s, arg_movw* a)
 {
+    if (sit_copy(s, 0, SIT_W, 0, 0, 0)) { return true; }
     int      pos = a->hw << 4;
     uint64_t imm = a->imm;
 
@@ -4129,6 +4383,7 @@ static bool trans_MOVN(DisasContext* s, arg_movw* a)
 
 static bool trans_MOVK(DisasContext* s, arg_movw* a)
 {
+    if (sit_copy(s, 0, SIT_RW, 0, 0, 0)) { return true; }
     int      pos = a->hw << 4;
     TCGv_i64 tcg_rd, tcg_im;
 
@@ -4145,6 +4400,8 @@ static bool trans_MOVK(DisasContext* s, arg_movw* a)
 
 static bool trans_SBFM(DisasContext* s, arg_SBFM* a)
 {
+    if (sit_copy(s, 0, SIT_W, SIT_R, 0, 0)) { return true; }
+
     TCGv_i64     tcg_rd  = cpu_reg(s, a->rd);
     TCGv_i64     tcg_tmp = read_cpu_reg(s, a->rn, 1);
     unsigned int bitsize = a->sf ? 64 : 32;
@@ -4184,6 +4441,8 @@ static bool trans_SBFM(DisasContext* s, arg_SBFM* a)
 
 static bool trans_UBFM(DisasContext* s, arg_UBFM* a)
 {
+    if (sit_copy(s, 0, SIT_W, SIT_R, 0, 0)) { return true; }
+
     TCGv_i64     tcg_rd  = cpu_reg(s, a->rd);
     TCGv_i64     tcg_tmp = read_cpu_reg(s, a->rn, 1);
     unsigned int bitsize = a->sf ? 64 : 32;
@@ -4210,6 +4469,8 @@ static bool trans_UBFM(DisasContext* s, arg_UBFM* a)
 
 static bool trans_BFM(DisasContext* s, arg_BFM* a)
 {
+    if (sit_copy(s, 0, SIT_RW, SIT_R, 0, 0)) { return true; }
+
     TCGv_i64     tcg_rd  = cpu_reg(s, a->rd);
     TCGv_i64     tcg_tmp = read_cpu_reg(s, a->rn, 1);
     unsigned int bitsize = a->sf ? 64 : 32;
@@ -4239,6 +4500,8 @@ static bool trans_BFM(DisasContext* s, arg_BFM* a)
 
 static bool trans_EXTR(DisasContext* s, arg_extract* a)
 {
+    if (sit_copy(s, 0, SIT_W, SIT_R, SIT_R, 0)) { return true; }
+
     TCGv_i64 tcg_rd, tcg_rm, tcg_rn;
 
     tcg_rd = cpu_reg(s, a->rd);
@@ -7074,6 +7337,8 @@ TRANS(SQRSHRUN_si, do_scalar_shift_imm_narrow, a, sqrshrun_fns, MO_SIGN, false)
 
 static bool do_div(DisasContext* s, arg_rrr_sf* a, bool is_signed)
 {
+    if (sit_copy(s, 0, SIT_W, SIT_R, SIT_R, 0)) { return true; }
+
     TCGv_i64 tcg_n, tcg_m, tcg_rd;
     tcg_rd = cpu_reg(s, a->rd);
 
@@ -7153,6 +7418,8 @@ static void shift_reg_imm(TCGv_i64 dst, TCGv_i64 src, int sf, enum a64_shift_typ
 
 static bool do_shift_reg(DisasContext* s, arg_rrr_sf* a, enum a64_shift_type shift_type)
 {
+    if (sit_copy(s, 0, SIT_W, SIT_R, SIT_R, 0)) { return true; }
+
     TCGv_i64 tcg_shift = tcg_temp_new_i64();
     TCGv_i64 tcg_rd    = cpu_reg(s, a->rd);
     TCGv_i64 tcg_rn    = read_cpu_reg(s, a->rn, a->sf);
@@ -7262,8 +7529,10 @@ static bool trans_PACGA(DisasContext* s, arg_rrr* a)
 
 typedef void ArithOneOp(TCGv_i64, TCGv_i64);
 
+/* RBIT, REV16, REV32, REV64, CLZ, CLS */
 static bool gen_rr(DisasContext* s, int rd, int rn, ArithOneOp fn)
 {
+    if (sit_copy(s, 0, SIT_W, SIT_R, 0, 0)) { return true; }
     fn(cpu_reg(s, rd), cpu_reg(s, rn));
     return true;
 }
@@ -7375,6 +7644,7 @@ static bool do_logic_reg(DisasContext* s, arg_logic_shift* a, ArithTwoOp* fn, Ar
     TCGv_i64 tcg_rd, tcg_rn, tcg_rm;
 
     if (!a->sf && (a->sa & (1 << 5))) { return false; }
+    if (sit_copy(s, setflags ? SIT_NZCV_W : 0, SIT_W, SIT_R, SIT_R, 0)) { return true; }
 
     tcg_rd = cpu_reg(s, a->rd);
     tcg_rn = cpu_reg(s, a->rn);
@@ -7394,6 +7664,7 @@ static bool trans_ORR_r(DisasContext* s, arg_logic_shift* a)
      * Unshifted ORR and ORN with WZR/XZR is the standard encoding for
      * register-register MOV and MVN, so it is worth special casing.
      */
+    if (!(!a->sf && (a->sa & (1 << 5))) && sit_copy(s, 0, SIT_W, SIT_R, SIT_R, 0)) { return true; }
     if (a->sa == 0 && a->st == 0 && a->rn == 31) {
         TCGv_i64 tcg_rd = cpu_reg(s, a->rd);
         TCGv_i64 tcg_rm = cpu_reg(s, a->rm);
@@ -7423,6 +7694,9 @@ static inline bool do_addsub_ext(DisasContext* s, arg_addsub_ext* a, bool sub_op
     TCGv_i64 tcg_rm, tcg_rn, tcg_rd;
 
     if (a->sa > 4) { return false; }
+    if (sit_copy(s, setflags ? SIT_NZCV_W : 0, SIT_W | (setflags ? 0 : SIT_SP), SIT_R | SIT_SP, SIT_R, 0)) {
+        return true;
+    }
 
     /* non-flag setting ops may use SP */
     if (!setflags) { tcg_rd = cpu_reg_sp(s, a->rd); }
@@ -7460,6 +7734,7 @@ static inline bool do_addsub_reg(DisasContext* s, arg_addsub_shift* a, bool sub_
     TCGv_i64 tcg_rd, tcg_rn, tcg_rm;
 
     if (a->st == 3 || (!a->sf && (a->sa & 32))) { return false; }
+    if (sit_copy(s, setflags ? SIT_NZCV_W : 0, SIT_W, SIT_R, SIT_R, 0)) { return true; }
 
     tcg_rd = cpu_reg(s, a->rd);
     tcg_rn = read_cpu_reg(s, a->rn, a->sf);
@@ -7490,6 +7765,8 @@ TRANS(SUBS_r, do_addsub_reg, a, true, true)
 
 static bool do_mulh(DisasContext* s, arg_rrr* a, void (*fn)(TCGv_i64, TCGv_i64, TCGv_i64, TCGv_i64))
 {
+    if (sit_copy(s, 0, SIT_W, SIT_R, SIT_R, 0)) { return true; }
+
     TCGv_i64 discard = tcg_temp_new_i64();
     TCGv_i64 tcg_rd  = cpu_reg(s, a->rd);
     TCGv_i64 tcg_rn  = cpu_reg(s, a->rn);
@@ -7504,6 +7781,8 @@ TRANS(UMULH, do_mulh, a, tcg_gen_mulu2_i64)
 
 static bool do_muladd(DisasContext* s, arg_rrrr* a, bool sf, bool is_sub, MemOp mop)
 {
+    if (sit_copy(s, 0, SIT_W, SIT_R, SIT_R, SIT_R)) { return true; }
+
     TCGv_i64 tcg_rd = cpu_reg(s, a->rd);
     TCGv_i64 tcg_op1, tcg_op2;
 
@@ -7549,6 +7828,8 @@ TRANS(UMSUBL, do_muladd, a, true, true, MO_UL)
 
 static bool do_adc_sbc(DisasContext* s, arg_rrr_sf* a, bool is_sub, bool setflags)
 {
+    if (sit_copy(s, SIT_NZCV_R | (setflags ? SIT_NZCV_W : 0), SIT_W, SIT_R, SIT_R, 0)) { return true; }
+
     TCGv_i64 tcg_y, tcg_rn, tcg_rd;
 
     tcg_rd = cpu_reg(s, a->rd);
@@ -7622,6 +7903,8 @@ TRANS_FEAT(SETF16, aa64_condm_4, do_setf, a->rn, 16)
 /* CCMP, CCMN */
 static bool trans_CCMP(DisasContext* s, arg_CCMP* a)
 {
+    if (sit_copy(s, SIT_NZCV_R | SIT_NZCV_W, 0, SIT_R, a->imm ? 0 : SIT_R, 0)) { return true; }
+
     TCGv_i32     tcg_t0  = tcg_temp_new_i32();
     TCGv_i32     tcg_t1  = tcg_temp_new_i32();
     TCGv_i32     tcg_t2  = tcg_temp_new_i32();
@@ -7700,6 +7983,8 @@ static bool trans_CCMP(DisasContext* s, arg_CCMP* a)
 
 static bool trans_CSEL(DisasContext* s, arg_CSEL* a)
 {
+    if (sit_copy(s, SIT_NZCV_R, SIT_W, SIT_R, SIT_R, 0)) { return true; }
+
     TCGv_i64       tcg_rd = cpu_reg(s, a->rd);
     TCGv_i64       zero   = tcg_constant_i64(0);
     DisasCompare64 c;
@@ -9123,6 +9408,17 @@ static void aarch64_tr_init_disas_context(DisasContextBase* dcbase, CPUState* cp
     /* If architectural single step active, limit to 1.  */
     if (dc->ss_active) { bound = 1; }
     dc->base.max_insns = MIN(dc->base.max_insns, bound);
+
+    /*
+     * Same-ISA translation: EL0 (and, experimentally, EL1 outside GXF),
+     * little-endian data, no single step, BTI or MTE (they would need
+     * TCG ops in the middle of a region).
+     */
+    dc->sit      = tcg_native_int && !dc->ss_active && dc->be_data == MO_LE && !dc->mte_active[0] &&
+              !dc->mte_active[1] && !dc_isar_feature(aa64_bti, dc) && !dc->pstate_il &&
+              (dc->current_el == 0 || (tcg_native_int_el1 && dc->current_el == 1 && !dc->guarded && !dc->nv));
+    dc->sit_open = false;
+    dc->sit_nzcv = false;
 }
 
 static void aarch64_tr_tb_start(DisasContextBase* db, CPUState* cpu) { }
@@ -9137,7 +9433,7 @@ static void aarch64_tr_insn_start(DisasContextBase* dcbase, CPUState* cpu)
     dc->insn_start_updated = false;
 }
 
-static void aarch64_tr_translate_insn(DisasContextBase* dcbase, CPUState* cpu)
+static void aarch64_tr_translate_insn_1(DisasContextBase* dcbase, CPUState* cpu)
 {
     DisasContext* s   = container_of(dcbase, DisasContext, base);
     CPUARMState*  env = cpu_env(cpu);
@@ -9230,9 +9526,27 @@ static void aarch64_tr_translate_insn(DisasContextBase* dcbase, CPUState* cpu)
     if (s->btype > 0 && s->base.is_jmp != DISAS_NORETURN) { reset_btype(s); }
 }
 
+static void aarch64_tr_translate_insn(DisasContextBase* dcbase, CPUState* cpu)
+{
+    DisasContext* s = container_of(dcbase, DisasContext, base);
+
+    s->sit_done = false;
+    aarch64_tr_translate_insn_1(dcbase, cpu);
+    if (s->sit_open && !s->sit_done && tcg_last_op() != s->base.insn_start) {
+        /* This insn was translated with TCG ops: end the SIT region before them. */
+        tcg_gen_sit_exit_after(s->base.insn_start);
+        s->sit_open = false;
+    }
+}
+
 static void aarch64_tr_tb_stop(DisasContextBase* dcbase, CPUState* cpu)
 {
     DisasContext* dc = container_of(dcbase, DisasContext, base);
+
+    if (dc->sit_open) {
+        tcg_gen_sit_exit();
+        dc->sit_open = false;
+    }
 
     if (unlikely(dc->ss_active)) {
         /* Note that this means single stepping WFI doesn't halt the CPU.

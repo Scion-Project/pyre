@@ -120,6 +120,18 @@ DEF(exit_tb, 0, 0, 1, TCG_OPF_BB_EXIT | TCG_OPF_BB_END | TCG_OPF_NOT_PRESENT)
 DEF(goto_tb, 0, 0, 1, TCG_OPF_BB_EXIT | TCG_OPF_BB_END | TCG_OPF_NOT_PRESENT)
 DEF(goto_ptr, 0, 1, 0, TCG_OPF_BB_EXIT | TCG_OPF_BB_END)
 
+/*
+ * Same-ISA translation regions (include/tcg/tcg-sit.h), generated only for
+ * AArch64 guests on AArch64 hosts (TCG_TARGET_HAS_sit). sit_enter saves the
+ * TCG globals to memory like a label; inside the region the backend owns
+ * the host registers. Constant arguments: sit_enter: SitLayout *;
+ * sit: SitInsn *; sit_brcond: SitInsn *, label.
+ */
+DEF(sit_enter, 0, 0, 1, TCG_OPF_BB_END | TCG_OPF_NOT_PRESENT)
+DEF(sit, 0, 0, 1, TCG_OPF_SIDE_EFFECTS | TCG_OPF_NOT_PRESENT)
+DEF(sit_exit, 0, 0, 0, TCG_OPF_SIDE_EFFECTS | TCG_OPF_NOT_PRESENT)
+DEF(sit_brcond, 0, 0, 2, TCG_OPF_BB_END | TCG_OPF_COND_BRANCH | TCG_OPF_NOT_PRESENT)
+
 DEF(qemu_ld, 1, 1, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
 DEF(qemu_st, 0, 2, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
 DEF(qemu_ld2, 2, 1, 1, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF_INT)
