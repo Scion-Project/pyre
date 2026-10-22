@@ -59,6 +59,8 @@ Ranked recommendation (details in "Design" and "Expected speedup"):
    pinnable registers covers only 71-75% of GPR references).
 3. **ASID-tagged softmmu TLB** (independent of ISA; high value for KPTI
    guests, and for any guest that switches address spaces often).
+   Implemented as ASID TLB contexts, see [ASID-TLB.md](ASID-TLB.md): the
+   KPTI `sys` loop goes from 37.4 s to 6.1 s.
 
 The two alternative near-native designs are costed at the end: running guest
 EL0 natively in the host process (large win for user code, very large
