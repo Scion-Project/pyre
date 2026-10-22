@@ -13,4 +13,5 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: files(
     'trng.c',
     'sim.c',
     'emu.c',
+    'rom-idle.c',
 ))
