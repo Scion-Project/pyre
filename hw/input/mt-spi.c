@@ -636,6 +636,13 @@ static void apple_mt_spi_handle_fw_packet(AppleMTSPIState* s)
 
     packet_type = apple_mt_spi_buf_read_byte(&s->rx, sizeof(uint32_t));
 
+    if (packet_type != LL_PACKET_NO_DATA) {
+        const uint8_t* d = s->rx.data;
+        trace_apple_mt_spi_ll_rx(packet_type, d[5], lduw_le_p(d + 6), lduw_le_p(d + 8), lduw_le_p(d + 10));
+        trace_apple_mt_spi_ll_rx_hid(d[12], d[13], d[14], d[15], lduw_le_p(d + 16), lduw_le_p(d + 18),
+                                     ldq_be_p(d + 20), ldq_be_p(d + 28));
+    }
+
     switch (packet_type) {
         case LL_PACKET_NO_DATA: break;
         case LL_PACKET_CONTROL: apple_mt_spi_handle_control(s); break;
