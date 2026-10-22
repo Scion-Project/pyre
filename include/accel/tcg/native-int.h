@@ -19,5 +19,7 @@ extern bool tcg_native_int;
 extern bool tcg_native_int_ldst;
 /* -accel tcg,x-native-int-el1=on: experimental, also at EL1 (measurement only). */
 extern bool tcg_native_int_el1;
+/* -accel tcg,x-native-int-fault=on: test only, slow paths skip writing back the guest registers. */
+extern bool tcg_native_int_fault;
 
 #endif

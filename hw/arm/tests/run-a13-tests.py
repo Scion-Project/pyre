@@ -103,6 +103,32 @@ for _variant, _flags in (("", []), (", sticky FPSR", ["-DSTICKY"])):
     ]
 
 
+# Native integer execution (-accel tcg,native-int=on, docs/NATIVE-INT.md).
+# native_int_check.S: directed EL0 tests (precise state at faults, SP/x18/
+# x29/x30, flags across slow paths, a store over the running code) that must
+# pass with native-int off, on, and on with loads/stores left to TCG; the
+# negative control skips the slow paths' register write-back
+# (x-native-int-fault) and must be caught at check 1. Then random EL0
+# programs (native_int_gen.py, native_int_rand.S) whose hash must be the
+# same with native-int off and on, and on AArch64 hosts the same as the host
+# CPU running the program natively.
+NI_MARCH = ["-march=armv8.4-a"]
+NI_ON_MSG = "native-int: on" if IS_AARCH64_HOST else "native-int: not available"
+NATIVE_INT_TESTS = [
+    ("native_int_check, native-int=off", "native_int_check.S", NI_MARCH, "pass",
+     {"accel": "native-int=off", "mem": "128M"}),
+    ("native_int_check, native-int=on", "native_int_check.S", NI_MARCH, "pass",
+     {"accel": "native-int=on", "mem": "128M", "need": NI_ON_MSG}),
+    ("native_int_check, native-int=on, x-native-int-ldst=off", "native_int_check.S", NI_MARCH, "pass",
+     {"accel": "native-int=on,x-native-int-ldst=off", "mem": "128M", "need": NI_ON_MSG}),
+    ("native_int_check (negative control: slow paths skip the register write-back)", "native_int_check.S",
+     NI_MARCH, ("mismatch", 1), {"accel": "native-int=on,x-native-int-fault=on", "mem": "128M",
+                                  "aarch64_only": True}),
+]
+NI_SEEDS = int(os.environ.get("NATIVE_INT_SEEDS", "8"))
+NI_INSNS = 3000
+
+
 def extract_text(obj_path):
     """Return the .text bytes of an ELF64 little-endian relocatable, refusing
     objects with relocations (a raw image cannot carry them)."""
@@ -145,10 +171,13 @@ def build(src, flags, workdir, tag):
     return img
 
 
-def run(qemu, img, accel=None, machine="a13-test"):
+def run(qemu, img, accel=None, machine="a13-test", mem=None, extra=()):
     cmd = [qemu, "-M", machine, "-display", "none", "-monitor", "none", "-serial", "none", "-kernel", img]
+    if mem:
+        cmd += ["-m", mem]
     if accel:
         cmd += ["-accel", "tcg," + accel]
+    cmd += list(extra)
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=TIMEOUT)
     except subprocess.TimeoutExpired as e:
@@ -189,7 +218,7 @@ def main():
         return 2
     qemu = sys.argv[1]
     failures = 0
-    tests = [t + ({},) for t in TESTS] + A14_TESTS + ASID_TESTS + FP_TESTS
+    tests = [t + ({},) for t in TESTS] + A14_TESTS + ASID_TESTS + FP_TESTS + NATIVE_INT_TESTS
     total = skipped = 0
     with tempfile.TemporaryDirectory() as workdir:
         for i, (name, src, flags, expect, opts) in enumerate(tests):
@@ -199,7 +228,7 @@ def main():
                 continue
             total += 1
             img = build(src, flags, workdir, f"t{i}")
-            code, out = run(qemu, img, opts.get("accel"), opts.get("machine", "a13-test"))
+            code, out = run(qemu, img, opts.get("accel"), opts.get("machine", "a13-test"), opts.get("mem"))
             ok, why = judge(expect, code, out)
             if ok and opts.get("need") and opts["need"] not in out:
                 ok, why = False, f"{why}, but QEMU did not report '{opts['need']}'"
@@ -216,8 +245,62 @@ def main():
         else:
             print("skip fp_native_check on the host CPU: host is not AArch64")
             skipped += 1
+        for seed in range(1, NI_SEEDS + 1):
+            total += 1
+            ok, why = native_int_random(qemu, seed, workdir)
+            print(f"{'ok  ' if ok else 'FAIL'} native_int_rand seed {seed} ({NI_INSNS} insns): {why}")
+            failures += 0 if ok else 1
     print(f"{total - failures}/{total} passed" + (f", {skipped} skipped" if skipped else ""))
     return 1 if failures else 0
+
+
+def native_int_random(qemu, seed, workdir):
+    """One random EL0 program: its hash with native-int off, on, and on with
+    loads/stores on TCG, and (AArch64 hosts) natively on the host CPU, must
+    all agree; for seed 1 the native-int run must really emit SIT regions."""
+    body = os.path.join(workdir, f"nic_body{seed}.inc")
+    with open(body, "w") as f:
+        subprocess.run([sys.executable, os.path.join(HERE, "native_int_gen.py"), str(seed), str(NI_INSNS)],
+                       stdout=f, check=True)
+    flags = NI_MARCH + [f'-DBODY="{body}"']
+    img = build("native_int_rand.S", flags, workdir, f"nic{seed}")
+    hashes = {}
+    for accel in ("native-int=off", "native-int=on", "native-int=on,x-native-int-ldst=off"):
+        extra = ()
+        if seed == 1 and accel == "native-int=on" and IS_AARCH64_HOST:
+            log = os.path.join(workdir, "nic_op.log")
+            extra = ("-d", "op", "-D", log)
+        code, out = run(qemu, img, accel, extra=extra)
+        m = re.search(r"nic-hash=([0-9a-f]{16})", out)
+        if code != 0 or not m:
+            return False, f"{accel}: exit {code}: " + " | ".join(out.strip().splitlines()[-3:])
+        hashes[accel] = m.group(1)
+        if extra:
+            with open(log) as f:
+                n = f.read().count("sit_enter")
+            if not n:
+                return False, "native-int=on emitted no SIT regions"
+    if IS_AARCH64_HOST:
+        cc = os.environ.get("HOST_CC", "cc")
+        main_c = os.path.join(workdir, "nic_host_main.c")
+        obj = os.path.join(workdir, f"nic_host{seed}.o")
+        exe = os.path.join(workdir, f"nic_host{seed}")
+        with open(main_c, "w") as f:
+            f.write("#include <stdio.h>\n#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n"
+                    "uint64_t nic_run(void *buf);\n"
+                    "int main(void) { void *b; if (posix_memalign(&b, 16384, 65536)) return 1; memset(b, 0, 65536);\n"
+                    "  printf(\"%016llx\\n\", (unsigned long long)nic_run(b)); return 0; }\n")
+        try:
+            subprocess.run([cc, "-march=armv8.4-a", "-c", "-x", "assembler-with-cpp", "-DHOST_HARNESS", *flags[1:],
+                            os.path.join(HERE, "native_int_rand.S"), "-o", obj], check=True)
+            subprocess.run([cc, main_c, obj, "-o", exe], check=True)
+            hashes["host CPU"] = subprocess.run([exe], stdout=subprocess.PIPE, check=True,
+                                                timeout=TIMEOUT).stdout.decode().strip()
+        except (subprocess.SubprocessError, OSError) as e:
+            return False, f"could not run the host harness: {e}"
+    if len(set(hashes.values())) != 1:
+        return False, "hashes differ: " + ", ".join(f"{k} {v}" for k, v in hashes.items())
+    return True, f"{len(hashes)} runs agree on {next(iter(hashes.values()))}"
 
 
 def host_reference(flags, workdir):
