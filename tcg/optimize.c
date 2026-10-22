@@ -2790,6 +2790,14 @@ void tcg_optimize(TCGContext* s)
             case INDEX_op_exit_tb      :
             case INDEX_op_goto_tb      :
             case INDEX_op_goto_ptr:
+            /*
+             * Same-ISA regions read and write guest state behind TCG's back:
+             * forget everything known about globals and memory.
+             */
+            case INDEX_op_sit_enter:
+            case INDEX_op_sit:
+            case INDEX_op_sit_exit:
+            case INDEX_op_sit_brcond:
                 finish_ebb(&ctx);
                 done = true;
                 break;

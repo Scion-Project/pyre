@@ -29,6 +29,7 @@
 #include "exec/translation-block.h"
 #include "tcg-internal.h"
 #include "tcg-has.h"
+#include "tcg/tcg-sit.h"
 
 /*
  * Encourage the compiler to tail-call to a function, rather than inlining.
@@ -213,6 +214,18 @@ static void add_as_label_use(TCGLabel* l, TCGOp* op)
 }
 
 void tcg_gen_br(TCGLabel* l) { add_as_label_use(l, tcg_gen_op1(INDEX_op_br, 0, label_arg(l))); }
+
+/* Same-ISA translation regions (tcg-sit.h): only for TCG_TARGET_HAS_sit hosts. */
+void tcg_gen_sit_enter(const SitLayout* lay) { tcg_gen_op1(INDEX_op_sit_enter, 0, (uintptr_t)lay); }
+
+void tcg_gen_sit(const SitInsn* si) { tcg_gen_op1(INDEX_op_sit, 0, (uintptr_t)si); }
+
+void tcg_gen_sit_exit(void) { tcg_emit_op(INDEX_op_sit_exit, 0); }
+
+void tcg_gen_sit_exit_after(TCGOp* op) { tcg_op_insert_after(tcg_ctx, op, INDEX_op_sit_exit, 0, 0); }
+
+void tcg_gen_sit_brcond(const SitInsn* si, TCGLabel* l)
+{ add_as_label_use(l, tcg_gen_op2(INDEX_op_sit_brcond, 0, (uintptr_t)si, label_arg(l))); }
 
 void tcg_gen_mb(TCGBar mb_type) { tcg_gen_op1(INDEX_op_mb, 0, mb_type); }
 
