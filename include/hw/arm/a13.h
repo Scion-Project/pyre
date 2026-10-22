@@ -130,6 +130,10 @@ typedef struct AppleA13Cluster
     AppleA13State*  cpus[A13_MAX_CPU];
     uint32_t        deferredIPI[A13_MAX_CPU];
     uint32_t        noWakeIPI[A13_MAX_CPU];
+    /* Immediate IPIs dropped because the destination already had one
+     * in-flight, indexed by destination, bit per waiting source -- retried
+     * from apple_a13_ipi_write_sr once the destination acknowledges. */
+    uint32_t        pendingImmediateIPI[A13_MAX_CPU];
     uint64_t        ipi_cr;
     QTAILQ_ENTRY(AppleA13Cluster) next;
     A13_CPREG_VAR_DEF(CTRR_A_LWR_EL1);
