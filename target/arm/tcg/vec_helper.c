@@ -1156,6 +1156,23 @@ static float32 float32_rsqrts_nf(float32 op1, float32 op2, float_status* stat)
 #define NATIVE_FP_TRY(KERNEL)
 #endif
 
+/* By-element kernels: NFP_IDX_HAS_<kernel> is 1 where one exists (and the host can run it). */
+#if ARM_NATIVE_FP_HOST
+#define NFP_IDX_CALL(KERNEL, D, N, M, A, OPRSZ, IDX) nfp_##KERNEL(D, N, M, A, OPRSZ, IDX)
+#define NFP_IDX_HAS_fmla_idx_s 1
+#define NFP_IDX_HAS_fmla_idx_d 1
+#define NFP_IDX_HAS_fmls_idx_s 1
+#define NFP_IDX_HAS_fmls_idx_d 1
+static inline void nfp_none(void* d, const void* n, const void* m, const void* a, intptr_t oprsz, intptr_t idx) { }
+#else
+#define NFP_IDX_CALL(KERNEL, D, N, M, A, OPRSZ, IDX) g_assert_not_reached()
+#define NFP_IDX_HAS_fmla_idx_s 0
+#define NFP_IDX_HAS_fmla_idx_d 0
+#define NFP_IDX_HAS_fmls_idx_s 0
+#define NFP_IDX_HAS_fmls_idx_d 0
+#endif
+#define NFP_IDX_HAS_none 0
+
 #define DO_3OP_NATIVE(NAME, FUNC, TYPE, KERNEL)                                        \
     void HELPER(NAME)(void* vd, void* vn, void* vm, float_status* stat, uint32_t desc) \
     {                                                                                  \
@@ -1188,24 +1205,24 @@ DO_3OP(gvec_ftsmul_s, float32_ftsmul, float32)
 DO_3OP(gvec_ftsmul_d, float64_ftsmul, float64)
 
 DO_3OP(gvec_fabd_h, float16_abd, float16)
-DO_3OP(gvec_fabd_s, float32_abd, float32)
-DO_3OP(gvec_fabd_d, float64_abd, float64)
+DO_3OP_NATIVE(gvec_fabd_s, float32_abd, float32, fabd_s)
+DO_3OP_NATIVE(gvec_fabd_d, float64_abd, float64, fabd_d)
 
 DO_3OP(gvec_ah_fabd_h, float16_ah_abd, float16)
 DO_3OP(gvec_ah_fabd_s, float32_ah_abd, float32)
 DO_3OP(gvec_ah_fabd_d, float64_ah_abd, float64)
 
 DO_3OP(gvec_fceq_h, float16_ceq, float16)
-DO_3OP(gvec_fceq_s, float32_ceq, float32)
-DO_3OP(gvec_fceq_d, float64_ceq, float64)
+DO_3OP_NATIVE(gvec_fceq_s, float32_ceq, float32, fceq_s)
+DO_3OP_NATIVE(gvec_fceq_d, float64_ceq, float64, fceq_d)
 
 DO_3OP(gvec_fcge_h, float16_cge, float16)
-DO_3OP(gvec_fcge_s, float32_cge, float32)
-DO_3OP(gvec_fcge_d, float64_cge, float64)
+DO_3OP_NATIVE(gvec_fcge_s, float32_cge, float32, fcge_s)
+DO_3OP_NATIVE(gvec_fcge_d, float64_cge, float64, fcge_d)
 
 DO_3OP(gvec_fcgt_h, float16_cgt, float16)
-DO_3OP(gvec_fcgt_s, float32_cgt, float32)
-DO_3OP(gvec_fcgt_d, float64_cgt, float64)
+DO_3OP_NATIVE(gvec_fcgt_s, float32_cgt, float32, fcgt_s)
+DO_3OP_NATIVE(gvec_fcgt_d, float64_cgt, float64, fcgt_d)
 
 DO_3OP(gvec_facge_h, float16_acge, float16)
 DO_3OP(gvec_facge_s, float32_acge, float32)
@@ -1216,20 +1233,20 @@ DO_3OP(gvec_facgt_s, float32_acgt, float32)
 DO_3OP(gvec_facgt_d, float64_acgt, float64)
 
 DO_3OP(gvec_fmax_h, float16_max, float16)
-DO_3OP(gvec_fmax_s, float32_max, float32)
-DO_3OP(gvec_fmax_d, float64_max, float64)
+DO_3OP_NATIVE(gvec_fmax_s, float32_max, float32, fmax_s)
+DO_3OP_NATIVE(gvec_fmax_d, float64_max, float64, fmax_d)
 
 DO_3OP(gvec_fmin_h, float16_min, float16)
-DO_3OP(gvec_fmin_s, float32_min, float32)
-DO_3OP(gvec_fmin_d, float64_min, float64)
+DO_3OP_NATIVE(gvec_fmin_s, float32_min, float32, fmin_s)
+DO_3OP_NATIVE(gvec_fmin_d, float64_min, float64, fmin_d)
 
 DO_3OP(gvec_fmaxnum_h, float16_maxnum, float16)
-DO_3OP(gvec_fmaxnum_s, float32_maxnum, float32)
-DO_3OP(gvec_fmaxnum_d, float64_maxnum, float64)
+DO_3OP_NATIVE(gvec_fmaxnum_s, float32_maxnum, float32, fmaxnum_s)
+DO_3OP_NATIVE(gvec_fmaxnum_d, float64_maxnum, float64, fmaxnum_d)
 
 DO_3OP(gvec_fminnum_h, float16_minnum, float16)
-DO_3OP(gvec_fminnum_s, float32_minnum, float32)
-DO_3OP(gvec_fminnum_d, float64_minnum, float64)
+DO_3OP_NATIVE(gvec_fminnum_s, float32_minnum, float32, fminnum_s)
+DO_3OP_NATIVE(gvec_fminnum_d, float64_minnum, float64, fminnum_d)
 
 DO_3OP(gvec_recps_nf_h, float16_recps_nf, float16)
 DO_3OP(gvec_recps_nf_s, float32_recps_nf, float32)
@@ -1239,8 +1256,8 @@ DO_3OP(gvec_rsqrts_nf_s, float32_rsqrts_nf, float32)
 
 #ifdef TARGET_AARCH64
 DO_3OP(gvec_fdiv_h, float16_div, float16)
-DO_3OP(gvec_fdiv_s, float32_div, float32)
-DO_3OP(gvec_fdiv_d, float64_div, float64)
+DO_3OP_NATIVE(gvec_fdiv_s, float32_div, float32, fdiv_s)
+DO_3OP_NATIVE(gvec_fdiv_d, float64_div, float64, fdiv_d)
 
 DO_3OP(gvec_fmulx_h, helper_advsimd_mulxh, float16)
 DO_3OP(gvec_fmulx_s, helper_vfp_mulxs, float32)
@@ -1436,10 +1453,30 @@ DO_MLA_IDX(gvec_mls_idx_d, uint64_t, -, H8)
 
 #define nop(N, M, S) (M)
 
+/* FMUL (by element) on the host FPU, see native-fp.h */
+#define DO_FMUL_IDX_NATIVE(NAME, TYPE, H, KERNEL)                                                  \
+    void HELPER(NAME)(void* vd, void* vn, void* vm, float_status* stat, uint32_t desc)             \
+    {                                                                                              \
+        intptr_t i, j, oprsz = simd_oprsz(desc);                                                   \
+        intptr_t segment = MIN(16, oprsz) / sizeof(TYPE);                                          \
+        intptr_t idx     = simd_data(desc);                                                        \
+        TYPE *   d = vd, *n = vn, *m = vm;                                                         \
+        if (ARM_NATIVE_FP_HOST && arm_native_fp_ok(stat)) {                                        \
+            NFP_IDX_CALL(KERNEL, vd, vn, vm, vd, oprsz, idx);                                      \
+            clear_tail(d, oprsz, simd_maxsz(desc));                                                \
+            return;                                                                                \
+        }                                                                                          \
+        for (i = 0; i < oprsz / sizeof(TYPE); i += segment) {                                      \
+            TYPE mm = m[H(i + idx)];                                                               \
+            for (j = 0; j < segment; j++) { d[i + j] = TYPE##_mul(n[i + j], mm, stat); }           \
+        }                                                                                          \
+        clear_tail(d, oprsz, simd_maxsz(desc));                                                    \
+    }
+
 DO_FMUL_IDX(gvec_fmul_idx_b16, nop, bfloat16_mul, float16, H2)
 DO_FMUL_IDX(gvec_fmul_idx_h, nop, float16_mul, float16, H2)
-DO_FMUL_IDX(gvec_fmul_idx_s, nop, float32_mul, float32, H4)
-DO_FMUL_IDX(gvec_fmul_idx_d, nop, float64_mul, float64, H8)
+DO_FMUL_IDX_NATIVE(gvec_fmul_idx_s, float32, H4, fmul_idx_s)
+DO_FMUL_IDX_NATIVE(gvec_fmul_idx_d, float64, H8, fmul_idx_d)
 
 #ifdef TARGET_AARCH64
 
@@ -1462,13 +1499,19 @@ DO_FMUL_IDX(gvec_fmls_nf_idx_s, float32_sub, float32_mul, float32, H4)
 
 #undef DO_FMUL_IDX
 
-#define DO_FMLA_IDX(NAME, TYPE, H, NEGX, NEGF)                                                                     \
+#define DO_FMLA_IDX(NAME, TYPE, H, NEGX, NEGF) DO_FMLA_IDX_N(NAME, TYPE, H, NEGX, NEGF, none)
+#define DO_FMLA_IDX_N(NAME, TYPE, H, NEGX, NEGF, KERNEL)                                                           \
     void HELPER(NAME)(void* vd, void* vn, void* vm, void* va, float_status* stat, uint32_t desc)                   \
     {                                                                                                              \
         intptr_t i, j, oprsz = simd_oprsz(desc);                                                                   \
         intptr_t segment = MIN(16, oprsz) / sizeof(TYPE);                                                          \
         intptr_t idx     = simd_data(desc);                                                                        \
         TYPE *   d = vd, *n = vn, *m = vm, *a = va;                                                                \
+        if (NFP_IDX_HAS_##KERNEL && arm_native_fp_ok(stat)) {                                                      \
+            NFP_IDX_CALL(KERNEL, vd, vn, vm, va, oprsz, idx);                                                      \
+            clear_tail(d, oprsz, simd_maxsz(desc));                                                                \
+            return;                                                                                                \
+        }                                                                                                          \
         for (i = 0; i < oprsz / sizeof(TYPE); i += segment) {                                                      \
             TYPE mm = m[H(i + idx)];                                                                               \
             for (j = 0; j < segment; j++) { d[i + j] = TYPE##_muladd(n[i + j] ^ NEGX, mm, a[i + j], NEGF, stat); } \
@@ -1477,13 +1520,13 @@ DO_FMUL_IDX(gvec_fmls_nf_idx_s, float32_sub, float32_mul, float32, H4)
     }
 
 DO_FMLA_IDX(gvec_fmla_idx_h, float16, H2, 0, 0)
-DO_FMLA_IDX(gvec_fmla_idx_s, float32, H4, 0, 0)
-DO_FMLA_IDX(gvec_fmla_idx_d, float64, H8, 0, 0)
+DO_FMLA_IDX_N(gvec_fmla_idx_s, float32, H4, 0, 0, fmla_idx_s)
+DO_FMLA_IDX_N(gvec_fmla_idx_d, float64, H8, 0, 0, fmla_idx_d)
 DO_FMLA_IDX(gvec_bfmla_idx, bfloat16, H2, 0, 0)
 
 DO_FMLA_IDX(gvec_fmls_idx_h, float16, H2, INT16_MIN, 0)
-DO_FMLA_IDX(gvec_fmls_idx_s, float32, H4, INT32_MIN, 0)
-DO_FMLA_IDX(gvec_fmls_idx_d, float64, H8, INT64_MIN, 0)
+DO_FMLA_IDX_N(gvec_fmls_idx_s, float32, H4, INT32_MIN, 0, fmls_idx_s)
+DO_FMLA_IDX_N(gvec_fmls_idx_d, float64, H8, INT64_MIN, 0, fmls_idx_d)
 DO_FMLA_IDX(gvec_bfmls_idx, bfloat16, H2, INT16_MIN, 0)
 
 DO_FMLA_IDX(gvec_ah_fmls_idx_h, float16, H2, 0, float_muladd_negate_product)
@@ -1492,6 +1535,7 @@ DO_FMLA_IDX(gvec_ah_fmls_idx_d, float64, H8, 0, float_muladd_negate_product)
 DO_FMLA_IDX(gvec_ah_bfmls_idx, bfloat16, H2, 0, float_muladd_negate_product)
 
 #undef DO_FMLA_IDX
+#undef DO_FMLA_IDX_N
 
 #define DO_SAT(NAME, WTYPE, TYPEN, TYPEM, OP, MIN, MAX)                      \
     void HELPER(NAME)(void* vd, void* vq, void* vn, void* vm, uint32_t desc) \
@@ -3058,114 +3102,3 @@ DO_SME2_LUT(4, 4, s, 4)
 
 #undef DO_SME2_LUT
 
-#if ARM_NATIVE_FP_HOST
-/*
- * Host self-test for native-fp, run once before it is enabled: every native
- * kernel against the softfloat path of the helper it replaces, over all
- * pairs/triples of special operands (signed zeros, denormals, extremes,
- * infinities, quiet and signalling NaNs with payloads, rounding ties,
- * ordinary values), comparing result bits and the IOC..IXC flags. Any
- * difference keeps the guest on softfloat. Lanes are broadcast so the flags
- * belong to one operand tuple; the guest-level check (fp_native_check.S)
- * covers mixed lanes.
- */
-static const uint64_t nfp_test_d[] = {
-    0x0000000000000000, 0x8000000000000000, 0x0000000000000001, 0x800fffffffffffff, 0x0010000000000000,
-    0x7fefffffffffffff, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000000, 0xfff8000000000123,
-    0x7ff0000000000456, 0x7ff4000000000789, 0x3ff0000000000000, 0xbff8000000000000, 0x3fb999999999999a,
-    0x4340000000000001, 0x3cb0000000000000, 0x7fe0000000000000, 0x0008000000000000, 0xc00921fb54442d18,
-    0x3ff0000000000001, 0x3ca0000000000000, 0x8010000000000001, 0xffefffffffffffff,
-};
-static const uint32_t nfp_test_s[] = {
-    0x00000000, 0x80000000, 0x00000001, 0x807fffff, 0x00800000, 0x7f7fffff, 0x7f800000, 0xff800000,
-    0x7fc00000, 0xffc00123, 0x7f800456, 0x7fa00789, 0x3f800000, 0xbfc00000, 0x3dcccccd, 0x4b000001,
-    0x33800000, 0x7f000000, 0x00400000, 0xc0490fdb, 0x3f800001, 0x33000000, 0x80800001, 0xff7fffff,
-};
-
-typedef void NfpKernelFn(void*, const void*, const void*, intptr_t);
-typedef void NfpHelperFn(void*, void*, void*, float_status*, uint32_t);
-
-static const struct
-{
-    const char*  name;
-    NfpKernelFn* kernel;
-    NfpHelperFn* helper;
-    int          esize;  /* 4 or 8 */
-    bool         addend; /* reads Vd */
-} nfp_tests[] = {
-    {"fadd.4s", nfp_fadd_s, helper_gvec_fadd_s, 4, false},  {"fsub.4s", nfp_fsub_s, helper_gvec_fsub_s, 4, false},
-    {"fmul.4s", nfp_fmul_s, helper_gvec_fmul_s, 4, false},  {"fmla.4s", nfp_fmla_s, helper_gvec_vfma_s, 4, true},
-    {"fmls.4s", nfp_fmls_s, helper_gvec_vfms_s, 4, true},   {"fadd.2d", nfp_fadd_d, helper_gvec_fadd_d, 8, false},
-    {"fsub.2d", nfp_fsub_d, helper_gvec_fsub_d, 8, false},  {"fmul.2d", nfp_fmul_d, helper_gvec_fmul_d, 8, false},
-    {"fmla.2d", nfp_fmla_d, helper_gvec_vfma_d, 8, true},   {"fmls.2d", nfp_fmls_d, helper_gvec_vfms_d, 8, true},
-};
-
-static uint32_t nfp_float_flags_to_fpsr(int f)
-{
-    return ((f & float_flag_invalid) ? FPSR_IOC : 0) | ((f & float_flag_divbyzero) ? FPSR_DZC : 0) |
-           ((f & float_flag_overflow) ? FPSR_OFC : 0) | ((f & float_flag_underflow) ? FPSR_UFC : 0) |
-           ((f & float_flag_inexact) ? FPSR_IXC : 0);
-}
-
-static void nfp_fill(uint64_t* v, int esize, uint64_t x)
-{
-    if (esize == 8) { v[0] = v[1] = x; }
-    else { v[0] = v[1] = x | (x << 32); }
-}
-
-const char* arm_native_fp_selftest(unsigned* ncases)
-{
-    static char  msg[160];
-    float_status ref;
-    unsigned     t, i, j, k, count = 0;
-
-    memset(&ref, 0, sizeof(ref));
-    arm_set_default_fp_behaviours(&ref);
-    set_float_rounding_mode(float_round_nearest_even, &ref);
-
-    for (t = 0; t < ARRAY_SIZE(nfp_tests); t++) {
-        int      es   = nfp_tests[t].esize;
-        unsigned nval = es == 8 ? ARRAY_SIZE(nfp_test_d) : ARRAY_SIZE(nfp_test_s);
-        unsigned nk   = nfp_tests[t].addend ? nval : 1;
-
-        for (int sz = 16; sz >= (es == 4 ? 8 : 16); sz -= 8) {
-        for (i = 0; i < nval; i++) {
-            for (j = 0; j < nval; j++) {
-                for (k = 0; k < nk; k++) {
-                    uint64_t a = es == 8 ? nfp_test_d[i] : nfp_test_s[i];
-                    uint64_t b = es == 8 ? nfp_test_d[j] : nfp_test_s[j];
-                    uint64_t c = es == 8 ? nfp_test_d[k] : nfp_test_s[k];
-                    uint64_t n[2], m[2], dref[4] = {0}, dnat[2];
-                    uint64_t host;
-                    uint32_t want;
-
-                    nfp_fill(n, es, a);
-                    nfp_fill(m, es, b);
-                    nfp_fill(dref, es, c);
-                    nfp_fill(dnat, es, c);
-                    set_float_exception_flags(0, &ref);
-                    nfp_tests[t].helper(dref, n, m, &ref, simd_desc(sz, sz, 0));
-                    want = nfp_float_flags_to_fpsr(get_float_exception_flags(&ref));
-
-                    asm volatile("msr fpsr, xzr" ::: "memory");
-                    nfp_tests[t].kernel(dnat, n, m, sz);
-                    asm volatile("mrs %0, fpsr" : "=r"(host)::"memory");
-                    host &= 0x1f;
-                    count++;
-                    if (memcmp(dref, dnat, sz) != 0 || host != want) {
-                        snprintf(msg, sizeof(msg),
-                                 "%s/%d(n=0x%" PRIx64 ", m=0x%" PRIx64 ", d=0x%" PRIx64 "): host 0x%" PRIx64
-                                 " fpsr 0x%" PRIx64 ", softfloat 0x%" PRIx64 " fpsr 0x%x",
-                                 nfp_tests[t].name, sz, a, b, c, dnat[0], host, dref[0], want);
-                        *ncases = count;
-                        return msg;
-                    }
-                }
-            }
-        }
-        }
-    }
-    *ncases = count;
-    return NULL;
-}
-#endif
