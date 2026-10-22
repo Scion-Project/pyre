@@ -49,7 +49,8 @@ exactly as with `native-fp=off`.
    SME ZA status always use softfloat.
 
 Covered instructions (helper level; each one is in the self-test and in
-`hw/arm/tests/fp_native_check.S`), single and double precision:
+`hw/arm/tests/fp_native_check.S`), single and double precision (the
+hottest are also emitted inline, see the next section):
 
 | guest instruction | forms | helper |
 |---|---|---|
@@ -73,6 +74,43 @@ other covered operation additionally requires the status rounding mode to be
 round-to-nearest-even. Fixed-point conversions (`#fbits` != 0), half
 precision, BFloat16, reductions, pairwise forms, FRINT*, FRECPE/FRSQRTE and
 the reciprocal steps stay on softfloat.
+
+## Inline host FP (TCG AArch64 backend)
+
+The helper-level path still pays a helper call per instruction. On top of
+it, the translator emits the most common forms as host FP instructions in
+the generated code, with no call at all:
+
+| guest instruction | inline as |
+|---|---|
+| FADD, FSUB, FMUL, FDIV, FMIN, FMAX, FMINNM, FMAXNM, FABD, FCMEQ, FCMGE, FCMGT (vector, `.2s/.4s/.2d`) | the same AdvSIMD instruction |
+| FMLA, FMLS (vector) | FMLA, FMLS |
+| FMUL, FMLA, FMLS (by element) | load-and-broadcast of the element (LD1R) + the vector form |
+| FADD, FSUB, FMUL, FDIV, FMIN, FMAX, FMINNM, FMAXNM, FSQRT (scalar `s/d`) | the same scalar instruction |
+| FMADD, FMSUB, FNMADD, FNMSUB (scalar `s/d`) | the same instruction |
+
+Everything else covered above (compares setting NZCV, conversions) stays in
+the native helpers.
+
+How it is guarded:
+
+* A TB flag, `NATIVE_FP` (A64 hflags), is set when native-fp is on and the
+  guest FPCR is native-compatible (condition 4 above). The translator only
+  emits inline host FP in TBs that carry it, so the FP mode is part of the
+  TB key and there is no per-instruction check. Guest `MSR FPCR` already
+  ends the TB and rebuilds hflags; FPCR changes from outside guest code
+  (gdbstub, reset, migration) are caught on the next `cpu_exec` entry, which
+  rebuilds hflags if the flag disagrees with FPCR.
+* New TCG vector opcodes `fp1_vec`, `fp2_vec`, `fp3_vec` (constant args:
+  the operation and "scalar"), implemented only by the AArch64 backend
+  (`TCG_TARGET_HAS_fp_vec`); every other backend reports them unsupported
+  and never sees them, since the flag is only ever set on AArch64 hosts.
+* With FPCR.NEP = 1 the scalar forms keep the helper path (merging).
+* Flags are handled exactly as for the helpers (next section): the inline
+  instructions accumulate into the host FPSR while the vCPU is live.
+
+`-accel tcg,native-fp=on,x-native-fp-inline=off` keeps native FP in the
+helpers only (diagnostic, and the CI tests run both ways).
 
 ## Cumulative exception flags
 
@@ -120,12 +158,15 @@ Variants:
 
 * FPSR cleared before every operation, and `-DSTICKY` (never cleared, covers
   accumulation across operations and FPCR writes);
-* `native-fp=off` and `=on`: both must give the embedded softfloat hash;
+* `native-fp=off`, `=on` (inline host FP) and `=on` with
+  `x-native-fp-inline=off` (helpers only): all must give the embedded
+  softfloat hash;
 * negative controls (AArch64 hosts): `x-native-fp-fault=on` makes the native
   FADD (double) swap its operands, which changes NaN propagation. With the
   self-test the fault must be caught (`host self-test failed`) and the run
   must still pass on softfloat; with `x-native-fp-selftest=off` the guest
-  hash must change (FAIL at check 1);
+  hash must change (FAIL at check 1), both inline (the translator swaps the
+  operands of the inline FADD.2d) and with helpers only;
 * the same instruction sequence run natively on the host CPU
   (`-DHOST_HARNESS`, AArch64 hosts) must give the embedded hash too, so
   softfloat, native-fp and the host hardware agree three ways.

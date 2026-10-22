@@ -2229,6 +2229,9 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
         case INDEX_op_umax_vec  : return has_type && TCG_TARGET_HAS_minmax_vec;
         case INDEX_op_bitsel_vec: return has_type && TCG_TARGET_HAS_bitsel_vec;
         case INDEX_op_cmpsel_vec: return has_type && TCG_TARGET_HAS_cmpsel_vec;
+        case INDEX_op_fp1_vec   :
+        case INDEX_op_fp2_vec   :
+        case INDEX_op_fp3_vec   : return has_type && TCG_TARGET_HAS_fp_vec;
 
         default:
             if (op < INDEX_op_last_generic) {

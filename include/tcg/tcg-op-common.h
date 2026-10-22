@@ -405,6 +405,38 @@ void tcg_gen_cmp_vec(TCGCond cond, unsigned vece, TCGv_vec r, TCGv_vec a, TCGv_v
 void tcg_gen_bitsel_vec(unsigned vece, TCGv_vec r, TCGv_vec a, TCGv_vec b, TCGv_vec c);
 void tcg_gen_cmpsel_vec(TCGCond cond, unsigned vece, TCGv_vec r, TCGv_vec a, TCGv_vec b, TCGv_vec c, TCGv_vec d);
 
+/*
+ * Arm floating point on the host FPU (TCG_TARGET_HAS_fp_vec hosts only; the
+ * front end must check tcg_can_emit_vec_op() and is responsible for the
+ * host FP mode matching the guest's, see target/arm/native-fp.h). Lane-wise
+ * on elements of size VECE (MO_32 or MO_64); with SCALAR only element 0 is
+ * computed (the Arm scalar form) and the rest of R is zeroed. The host FPU
+ * accumulates its cumulative exception flags in the host FPSR.
+ */
+typedef enum TCGFPOp {
+    TCG_FP_ADD,   /* fp2: a + b */
+    TCG_FP_SUB,   /* fp2: a - b */
+    TCG_FP_MUL,   /* fp2: a * b */
+    TCG_FP_DIV,   /* fp2: a / b */
+    TCG_FP_MAX,   /* fp2: Arm FMAX */
+    TCG_FP_MIN,   /* fp2: Arm FMIN */
+    TCG_FP_MAXNM, /* fp2: Arm FMAXNM */
+    TCG_FP_MINNM, /* fp2: Arm FMINNM */
+    TCG_FP_ABD,   /* fp2: |a - b| (Arm FABD) */
+    TCG_FP_CMEQ,  /* fp2: a == b ? all-ones : 0 (Arm FCMEQ) */
+    TCG_FP_CMGE,  /* fp2: a >= b ? all-ones : 0 (Arm FCMGE) */
+    TCG_FP_CMGT,  /* fp2: a > b ? all-ones : 0 (Arm FCMGT) */
+    TCG_FP_SQRT,  /* fp1: sqrt(a) */
+    TCG_FP_MADD,  /* fp3: acc + a * b, fused (Arm FMLA/FMADD) */
+    TCG_FP_MSUB,  /* fp3: acc - a * b, fused (Arm FMLS/FMSUB) */
+    TCG_FP_NMADD, /* fp3, scalar only: -acc - a * b (Arm FNMADD) */
+    TCG_FP_NMSUB, /* fp3, scalar only: -acc + a * b (Arm FNMSUB) */
+} TCGFPOp;
+
+void tcg_gen_fp1_vec(unsigned vece, TCGv_vec r, TCGv_vec a, TCGFPOp fop, bool scalar);
+void tcg_gen_fp2_vec(unsigned vece, TCGv_vec r, TCGv_vec a, TCGv_vec b, TCGFPOp fop, bool scalar);
+void tcg_gen_fp3_vec(unsigned vece, TCGv_vec r, TCGv_vec acc, TCGv_vec a, TCGv_vec b, TCGFPOp fop, bool scalar);
+
 void tcg_gen_ld_vec(TCGv_vec r, TCGv_ptr base, TCGArg offset);
 void tcg_gen_st_vec(TCGv_vec r, TCGv_ptr base, TCGArg offset);
 void tcg_gen_stl_vec(TCGv_vec r, TCGv_ptr base, TCGArg offset, TCGType t);

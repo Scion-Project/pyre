@@ -161,6 +161,36 @@ void vec_gen_4(TCGOpcode opc, TCGType type, unsigned vece, TCGArg r, TCGArg a, T
     op->args[3]    = c;
 }
 
+static void vec_gen_fp(TCGOpcode opc, TCGv_vec r, TCGv_vec a, TCGv_vec b, TCGv_vec c, unsigned vece, TCGFPOp fop,
+                       bool scalar)
+{
+    TCGTemp* rt   = tcgv_vec_temp(r);
+    TCGType  type = rt->base_type;
+    int      n    = 0;
+    TCGOp*   op;
+
+    tcg_debug_assert(vece == MO_32 || vece == MO_64);
+    tcg_debug_assert(tcg_can_emit_vec_op(opc, type, vece) > 0);
+    op             = tcg_emit_op(opc, 1 + tcg_op_defs[opc].nb_iargs + 2);
+    TCGOP_TYPE(op) = type;
+    TCGOP_VECE(op) = vece;
+    op->args[n++]  = temp_arg(rt);
+    op->args[n++]  = tcgv_vec_arg(a);
+    if (b) { op->args[n++] = tcgv_vec_arg(b); }
+    if (c) { op->args[n++] = tcgv_vec_arg(c); }
+    op->args[n++] = fop;
+    op->args[n++] = scalar;
+}
+
+void tcg_gen_fp1_vec(unsigned vece, TCGv_vec r, TCGv_vec a, TCGFPOp fop, bool scalar)
+{ vec_gen_fp(INDEX_op_fp1_vec, r, a, NULL, NULL, vece, fop, scalar); }
+
+void tcg_gen_fp2_vec(unsigned vece, TCGv_vec r, TCGv_vec a, TCGv_vec b, TCGFPOp fop, bool scalar)
+{ vec_gen_fp(INDEX_op_fp2_vec, r, a, b, NULL, vece, fop, scalar); }
+
+void tcg_gen_fp3_vec(unsigned vece, TCGv_vec r, TCGv_vec acc, TCGv_vec a, TCGv_vec b, TCGFPOp fop, bool scalar)
+{ vec_gen_fp(INDEX_op_fp3_vec, r, acc, a, b, vece, fop, scalar); }
+
 void vec_gen_6(TCGOpcode opc, TCGType type, unsigned vece, TCGArg r, TCGArg a, TCGArg b, TCGArg c, TCGArg d, TCGArg e)
 {
     TCGOp* op      = tcg_emit_op(opc, 6);

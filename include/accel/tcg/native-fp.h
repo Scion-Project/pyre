@@ -13,5 +13,7 @@ extern bool tcg_native_fp;
 extern bool tcg_native_fp_fault;
 /* -accel tcg,x-native-fp-selftest=off: test only, skip the target's host self-test. */
 extern bool tcg_native_fp_selftest;
+/* -accel tcg,x-native-fp-inline=off: diagnostic, keep native FP inside helpers (no inline host FP code). */
+extern bool tcg_native_fp_inline;
 
 #endif

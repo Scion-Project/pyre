@@ -150,6 +150,8 @@ typedef struct DisasContext
     bool fpcr_ah;
     /* True if FPCR.NEP is 1 (FEAT_AFP scalar upper-element result handling) */
     bool fpcr_nep;
+    /* True if covered FP ops may be emitted as host FP instructions (native-fp.h) */
+    bool native_fp;
     /*
      * >= 0, a copy of PSTATE.BTYPE, which will be 0 without v8.5-BTI.
      *  < 0, set by the current instruction.

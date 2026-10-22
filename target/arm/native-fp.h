@@ -36,6 +36,8 @@
 
 /* Set once at the first CPU realize: requested, host is AArch64, host self-test passed. */
 extern bool arm_native_fp_on;
+/* arm_native_fp_on and the translator may emit host FP inline (TB flag NATIVE_FP); else helpers only. */
+extern bool arm_native_fp_inline;
 /* Test-only fault injection (accel property x-native-fp-fault): native FADD (.2d/d) swaps its operands. */
 extern bool arm_native_fp_fault;
 

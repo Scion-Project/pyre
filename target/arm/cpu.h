@@ -2541,6 +2541,12 @@ REG_FIELD(TBFLAG_A64, NV2_MEM_BE, 36, 1)
 REG_FIELD(TBFLAG_A64, AH, 37, 1)  /* FPCR.AH */
 REG_FIELD(TBFLAG_A64, NEP, 38, 1) /* FPCR.NEP */
 REG_FIELD(TBFLAG_A64, ZT0EXC_EL, 39, 2)
+/*
+ * -accel tcg,native-fp=on and FPCR native-compatible: FP may be emitted as
+ * host FP (native-fp.h). Kept at the top bit, clear of the fields upstream
+ * keeps adding after ZT0EXC_EL (FEAT_GCS uses 41..44 in QEMU 10.2).
+ */
+REG_FIELD(TBFLAG_A64, NATIVE_FP, 63, 1)
 
 /*
  * Helpers for using the above. Note that only the A64 accessors use

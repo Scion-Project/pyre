@@ -22,6 +22,9 @@
 #define TCG_TARGET_HAS_v128 1
 #define TCG_TARGET_HAS_v256 0
 
+/* Arm FP on the host FPU (fp1/fp2/fp3_vec): only meaningful for an AArch64 guest. */
+#define TCG_TARGET_HAS_fp_vec 1
+
 #define TCG_TARGET_HAS_andc_vec   1
 #define TCG_TARGET_HAS_orc_vec    1
 #define TCG_TARGET_HAS_nand_vec   0
