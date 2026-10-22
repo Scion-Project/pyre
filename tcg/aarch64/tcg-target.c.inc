@@ -1475,11 +1475,19 @@ static TCGLabelQemuLdst* prepare_host_addr(TCGContext* s, HostAddress* h, TCGReg
     ldst->oi       = oi;
     ldst->addr_reg = addr_reg;
 
-    /* Load CPUTLBDescFast.{mask,table} into {tmp0,tmp1}. */
+    /*
+     * Load CPUTLBDescFast.{mask,table} into {tmp0,tmp1}: one LDP when the
+     * offset fits its scaled 7-bit immediate (it does for every mmu index
+     * while CPUTLBDescFast[] is the end of CPUNegativeOffsetState).
+     */
     QEMU_BUILD_BUG_ON(offsetof(CPUTLBDescFast, mask) != 0);
     QEMU_BUILD_BUG_ON(offsetof(CPUTLBDescFast, table) != 8);
-    tcg_out_insn(s, 3401, SUBI, addr_type, TCG_REG_TMP0, TCG_AREG0, -tlb_mask_table_ofs(s, mem_index));
-    tcg_out_insn(s, 3314, LDP, TCG_REG_TMP0, TCG_REG_TMP1, TCG_REG_TMP0, 0, 1, 0);
+    int fast_ofs = tlb_mask_table_ofs(s, mem_index);
+    if (fast_ofs >= -0x200) { tcg_out_insn(s, 3314, LDP, TCG_REG_TMP0, TCG_REG_TMP1, TCG_AREG0, fast_ofs, 1, 0); }
+    else {
+        tcg_out_insn(s, 3401, SUBI, TCG_TYPE_I64, TCG_REG_TMP0, TCG_AREG0, -fast_ofs);
+        tcg_out_insn(s, 3314, LDP, TCG_REG_TMP0, TCG_REG_TMP1, TCG_REG_TMP0, 0, 1, 0);
+    }
 
     /* Extract the TLB index from the address into X0.  */
     tcg_out_insn(s, 3502S, AND_LSR, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0, addr_reg,
@@ -1488,11 +1496,18 @@ static TCGLabelQemuLdst* prepare_host_addr(TCGContext* s, HostAddress* h, TCGReg
     /* Add the tlb_table pointer, forming the CPUTLBEntry address. */
     tcg_out_insn(s, 3502, ADD, 1, TCG_REG_TMP1, TCG_REG_TMP1, TCG_REG_TMP0);
 
-    /* Load the tlb comparator into TMP0, and the fast path addend. */
+    /*
+     * Load the tlb comparator into TMP0 and the fast path addend into TMP1
+     * with one LDP: the addend sits between addr_read and addr_write.
+     * A 32-bit comparator is the low half of its 64-bit slot.
+     */
     QEMU_BUILD_BUG_ON(HOST_BIG_ENDIAN);
-    tcg_out_ld(s, addr_type, TCG_REG_TMP0, TCG_REG_TMP1,
-               is_ld ? offsetof(CPUTLBEntry, addr_read) : offsetof(CPUTLBEntry, addr_write));
-    tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_TMP1, TCG_REG_TMP1, offsetof(CPUTLBEntry, addend));
+    QEMU_BUILD_BUG_ON(offsetof(CPUTLBEntry, addend) != offsetof(CPUTLBEntry, addr_read) + 8);
+    QEMU_BUILD_BUG_ON(offsetof(CPUTLBEntry, addr_write) != offsetof(CPUTLBEntry, addend) + 8);
+    if (is_ld) {
+        tcg_out_insn(s, 3314, LDP, TCG_REG_TMP0, TCG_REG_TMP1, TCG_REG_TMP1, offsetof(CPUTLBEntry, addr_read), 1, 0);
+    }
+    else { tcg_out_insn(s, 3314, LDP, TCG_REG_TMP1, TCG_REG_TMP0, TCG_REG_TMP1, offsetof(CPUTLBEntry, addend), 1, 0); }
 
     /*
      * For aligned accesses, we check the first byte and include
