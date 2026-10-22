@@ -44,6 +44,13 @@ WORKLOADS = [
     ("w9", ["-DWORKLOAD=9", "-DITERS=1000000"], "2M ASID switches, KPTI-style (16 pages, 4 calls each)"),
     ("w10", ["-DWORKLOAD=10", "-DITERS=20000000"], "320M loads/stores, softmmu TLB hits"),
     ("w11", ["-DWORKLOAD=11", "-DITERS=1000000"], "4M loads scattered over 4096 pages (TLB refills)"),
+    ("w12", ["-DWORKLOAD=12", "-DITERS=20000"], "compiled C: list walk with calls + byte state machine"),
+    # The same at EL0 with the MMU on, where -accel tcg,native-int applies
+    ("u1", ["-DEL0", "-DWORKLOAD=1", "-DITERS=60000000"], "EL0: hot BL/RET"),
+    ("u2", ["-DEL0", "-DWORKLOAD=2"], "EL0: BLR/RET over 4096 targets"),
+    ("u4", ["-DEL0", "-DWORKLOAD=4", "-DITERS=100000000"], "EL0: ALU loop"),
+    ("u10", ["-DEL0", "-DWORKLOAD=10", "-DITERS=20000000"], "EL0: 320M loads/stores, TLB hits"),
+    ("u12", ["-DEL0", "-DWORKLOAD=12", "-DITERS=20000"], "EL0: compiled C: list walk with calls + byte state machine"),
 ]
 
 
