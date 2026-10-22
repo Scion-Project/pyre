@@ -21,15 +21,22 @@
 #include "cpu.h"
 #include "internals.h"
 #include "cpu-features.h"
+#include "system/tcg.h"
+#include "native-fp.h"
 
 uint32_t vfp_get_fpcr(CPUARMState* env)
 { return env->vfp.fpcr | (env->vfp.vec_len << 16) | (env->vfp.vec_stride << 20); }
 
 uint32_t vfp_get_fpsr(CPUARMState* env)
 {
-    uint32_t fpsr = env->vfp.fpsr;
+    uint32_t fpsr;
     uint32_t i;
 
+#ifdef CONFIG_TCG
+    /* Flags raised by guest FP ops executed on the host FPU (native-fp.h). */
+    if (tcg_enabled()) { arm_native_fp_fold(env); }
+#endif
+    fpsr  = env->vfp.fpsr;
     fpsr |= vfp_get_fpsr_from_host(env);
 
     i     = env->vfp.qc[0] | env->vfp.qc[1] | env->vfp.qc[2] | env->vfp.qc[3];
@@ -66,6 +73,9 @@ void vfp_set_fpsr(CPUARMState* env, uint32_t val)
     val           &= FPSR_NZCV_MASK | FPSR_CEXC_MASK;
     env->vfp.fpsr  = val;
     vfp_clear_float_status_exc_flags(env);
+#ifdef CONFIG_TCG
+    if (tcg_enabled()) { arm_native_fp_fpsr_written(env); }
+#endif
 }
 
 static void vfp_set_fpcr_masked(CPUARMState* env, uint32_t val, uint32_t mask)
@@ -83,6 +93,10 @@ static void vfp_set_fpcr_masked(CPUARMState* env, uint32_t val, uint32_t mask)
 
     if (!cpu_isar_feature(aa64_ebf16, cpu)) { val &= ~FPCR_EBF; }
 
+#ifdef CONFIG_TCG
+    /* Fold host-FPU flags under the old FP mode before the mode changes. */
+    if (tcg_enabled()) { arm_native_fp_fold(env); }
+#endif
     vfp_set_fpcr_to_host(env, val, mask);
 
     if (mask & (FPCR_LEN_MASK | FPCR_STRIDE_MASK)) {
@@ -111,6 +125,9 @@ static void vfp_set_fpcr_masked(CPUARMState* env, uint32_t val, uint32_t mask)
     val &= FPCR_AHP | FPCR_DN | FPCR_FZ | FPCR_RMODE_MASK | FPCR_FZ16 | FPCR_EBF | FPCR_FIZ | FPCR_AH | FPCR_NEP;
     env->vfp.fpcr &= ~mask;
     env->vfp.fpcr |= val;
+#ifdef CONFIG_TCG
+    if (tcg_enabled()) { arm_native_fp_fpcr_written(env); }
+#endif
 }
 
 void vfp_set_fpcr(CPUARMState* env, uint32_t val) { vfp_set_fpcr_masked(env, val, MAKE_64BIT_MASK(0, 32)); }

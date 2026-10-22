@@ -62,4 +62,5 @@ arm_common_system_ss.add(files(
   'tlb_helper.c',
   'tlb-insns.c',
   'vfp_helper.c',
+  'native_fp.c',
 ))

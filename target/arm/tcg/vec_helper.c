@@ -25,6 +25,8 @@
 #include "qemu/int128.h"
 #include "crypto/clmul.h"
 #include "vec_internal.h"
+#include "internals.h"
+#include "native-fp.h"
 
 /*
  * Data for expanding active predicate bits to bytes, for byte elements.
@@ -1139,22 +1141,47 @@ static float32 float32_rsqrts_nf(float32 op1, float32 op2, float_status* stat)
         clear_tail(d, oprsz, simd_maxsz(desc));                                        \
     }
 
+/*
+ * Same, but executed with the host instruction (native-fp.h) when the
+ * status allows it; KERNEL is the nfp_* vector kernel of the same operation.
+ */
+#if ARM_NATIVE_FP_HOST
+#define NATIVE_FP_TRY(KERNEL)                                                    \
+    if (arm_native_fp_ok(stat)) {                                                \
+        nfp_##KERNEL(vd, vn, vm, simd_oprsz(desc));                              \
+        clear_tail(vd, simd_oprsz(desc), simd_maxsz(desc));                      \
+        return;                                                                  \
+    }
+#else
+#define NATIVE_FP_TRY(KERNEL)
+#endif
+
+#define DO_3OP_NATIVE(NAME, FUNC, TYPE, KERNEL)                                        \
+    void HELPER(NAME)(void* vd, void* vn, void* vm, float_status* stat, uint32_t desc) \
+    {                                                                                  \
+        intptr_t i, oprsz = simd_oprsz(desc);                                          \
+        TYPE *   d = vd, *n = vn, *m = vm;                                             \
+        NATIVE_FP_TRY(KERNEL)                                                          \
+        for (i = 0; i < oprsz / sizeof(TYPE); i++) { d[i] = FUNC(n[i], m[i], stat); }  \
+        clear_tail(d, oprsz, simd_maxsz(desc));                                        \
+    }
+
 DO_3OP(gvec_fadd_b16, bfloat16_add, float16)
 DO_3OP(gvec_fadd_h, float16_add, float16)
-DO_3OP(gvec_fadd_s, float32_add, float32)
-DO_3OP(gvec_fadd_d, float64_add, float64)
+DO_3OP_NATIVE(gvec_fadd_s, float32_add, float32, fadd_s)
+DO_3OP_NATIVE(gvec_fadd_d, float64_add, float64, fadd_d)
 DO_3OP(gvec_bfadd, bfloat16_add, bfloat16)
 
 DO_3OP(gvec_fsub_b16, bfloat16_sub, float16)
 DO_3OP(gvec_fsub_h, float16_sub, float16)
-DO_3OP(gvec_fsub_s, float32_sub, float32)
-DO_3OP(gvec_fsub_d, float64_sub, float64)
+DO_3OP_NATIVE(gvec_fsub_s, float32_sub, float32, fsub_s)
+DO_3OP_NATIVE(gvec_fsub_d, float64_sub, float64, fsub_d)
 DO_3OP(gvec_bfsub, bfloat16_sub, bfloat16)
 
 DO_3OP(gvec_fmul_b16, bfloat16_mul, float16)
 DO_3OP(gvec_fmul_h, float16_mul, float16)
-DO_3OP(gvec_fmul_s, float32_mul, float32)
-DO_3OP(gvec_fmul_d, float64_mul, float64)
+DO_3OP_NATIVE(gvec_fmul_s, float32_mul, float32, fmul_s)
+DO_3OP_NATIVE(gvec_fmul_d, float64_mul, float64, fmul_d)
 
 DO_3OP(gvec_ftsmul_h, float16_ftsmul, float16)
 DO_3OP(gvec_ftsmul_s, float32_ftsmul, float32)
@@ -1312,6 +1339,16 @@ static float64 float64_ah_mulsub_f(float64 dest, float64 op1, float64 op2, float
         clear_tail(d, oprsz, simd_maxsz(desc));                                             \
     }
 
+#define DO_MULADD_NATIVE(NAME, FUNC, TYPE, KERNEL)                                          \
+    void HELPER(NAME)(void* vd, void* vn, void* vm, float_status* stat, uint32_t desc)      \
+    {                                                                                       \
+        intptr_t i, oprsz = simd_oprsz(desc);                                               \
+        TYPE *   d = vd, *n = vn, *m = vm;                                                  \
+        NATIVE_FP_TRY(KERNEL)                                                               \
+        for (i = 0; i < oprsz / sizeof(TYPE); i++) { d[i] = FUNC(d[i], n[i], m[i], stat); } \
+        clear_tail(d, oprsz, simd_maxsz(desc));                                             \
+    }
+
 DO_MULADD(gvec_fmla_nf_h, float16_muladd_nf, float16)
 DO_MULADD(gvec_fmla_nf_s, float32_muladd_nf, float32)
 
@@ -1319,13 +1356,13 @@ DO_MULADD(gvec_fmls_nf_h, float16_mulsub_nf, float16)
 DO_MULADD(gvec_fmls_nf_s, float32_mulsub_nf, float32)
 
 DO_MULADD(gvec_vfma_h, float16_muladd_f, float16)
-DO_MULADD(gvec_vfma_s, float32_muladd_f, float32)
-DO_MULADD(gvec_vfma_d, float64_muladd_f, float64)
+DO_MULADD_NATIVE(gvec_vfma_s, float32_muladd_f, float32, fmla_s)
+DO_MULADD_NATIVE(gvec_vfma_d, float64_muladd_f, float64, fmla_d)
 DO_MULADD(gvec_bfmla, bfloat16_muladd_f, bfloat16)
 
 DO_MULADD(gvec_vfms_h, float16_mulsub_f, float16)
-DO_MULADD(gvec_vfms_s, float32_mulsub_f, float32)
-DO_MULADD(gvec_vfms_d, float64_mulsub_f, float64)
+DO_MULADD_NATIVE(gvec_vfms_s, float32_mulsub_f, float32, fmls_s)
+DO_MULADD_NATIVE(gvec_vfms_d, float64_mulsub_f, float64, fmls_d)
 DO_MULADD(gvec_bfmls, bfloat16_mulsub_f, bfloat16)
 
 DO_MULADD(gvec_ah_vfms_h, float16_ah_mulsub_f, float16)
@@ -3020,3 +3057,115 @@ DO_SME2_LUT(4, 4, h, 2)
 DO_SME2_LUT(4, 4, s, 4)
 
 #undef DO_SME2_LUT
+
+#if ARM_NATIVE_FP_HOST
+/*
+ * Host self-test for native-fp, run once before it is enabled: every native
+ * kernel against the softfloat path of the helper it replaces, over all
+ * pairs/triples of special operands (signed zeros, denormals, extremes,
+ * infinities, quiet and signalling NaNs with payloads, rounding ties,
+ * ordinary values), comparing result bits and the IOC..IXC flags. Any
+ * difference keeps the guest on softfloat. Lanes are broadcast so the flags
+ * belong to one operand tuple; the guest-level check (fp_native_check.S)
+ * covers mixed lanes.
+ */
+static const uint64_t nfp_test_d[] = {
+    0x0000000000000000, 0x8000000000000000, 0x0000000000000001, 0x800fffffffffffff, 0x0010000000000000,
+    0x7fefffffffffffff, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000000, 0xfff8000000000123,
+    0x7ff0000000000456, 0x7ff4000000000789, 0x3ff0000000000000, 0xbff8000000000000, 0x3fb999999999999a,
+    0x4340000000000001, 0x3cb0000000000000, 0x7fe0000000000000, 0x0008000000000000, 0xc00921fb54442d18,
+    0x3ff0000000000001, 0x3ca0000000000000, 0x8010000000000001, 0xffefffffffffffff,
+};
+static const uint32_t nfp_test_s[] = {
+    0x00000000, 0x80000000, 0x00000001, 0x807fffff, 0x00800000, 0x7f7fffff, 0x7f800000, 0xff800000,
+    0x7fc00000, 0xffc00123, 0x7f800456, 0x7fa00789, 0x3f800000, 0xbfc00000, 0x3dcccccd, 0x4b000001,
+    0x33800000, 0x7f000000, 0x00400000, 0xc0490fdb, 0x3f800001, 0x33000000, 0x80800001, 0xff7fffff,
+};
+
+typedef void NfpKernelFn(void*, const void*, const void*, intptr_t);
+typedef void NfpHelperFn(void*, void*, void*, float_status*, uint32_t);
+
+static const struct
+{
+    const char*  name;
+    NfpKernelFn* kernel;
+    NfpHelperFn* helper;
+    int          esize;  /* 4 or 8 */
+    bool         addend; /* reads Vd */
+} nfp_tests[] = {
+    {"fadd.4s", nfp_fadd_s, helper_gvec_fadd_s, 4, false},  {"fsub.4s", nfp_fsub_s, helper_gvec_fsub_s, 4, false},
+    {"fmul.4s", nfp_fmul_s, helper_gvec_fmul_s, 4, false},  {"fmla.4s", nfp_fmla_s, helper_gvec_vfma_s, 4, true},
+    {"fmls.4s", nfp_fmls_s, helper_gvec_vfms_s, 4, true},   {"fadd.2d", nfp_fadd_d, helper_gvec_fadd_d, 8, false},
+    {"fsub.2d", nfp_fsub_d, helper_gvec_fsub_d, 8, false},  {"fmul.2d", nfp_fmul_d, helper_gvec_fmul_d, 8, false},
+    {"fmla.2d", nfp_fmla_d, helper_gvec_vfma_d, 8, true},   {"fmls.2d", nfp_fmls_d, helper_gvec_vfms_d, 8, true},
+};
+
+static uint32_t nfp_float_flags_to_fpsr(int f)
+{
+    return ((f & float_flag_invalid) ? FPSR_IOC : 0) | ((f & float_flag_divbyzero) ? FPSR_DZC : 0) |
+           ((f & float_flag_overflow) ? FPSR_OFC : 0) | ((f & float_flag_underflow) ? FPSR_UFC : 0) |
+           ((f & float_flag_inexact) ? FPSR_IXC : 0);
+}
+
+static void nfp_fill(uint64_t* v, int esize, uint64_t x)
+{
+    if (esize == 8) { v[0] = v[1] = x; }
+    else { v[0] = v[1] = x | (x << 32); }
+}
+
+const char* arm_native_fp_selftest(unsigned* ncases)
+{
+    static char  msg[160];
+    float_status ref;
+    unsigned     t, i, j, k, count = 0;
+
+    memset(&ref, 0, sizeof(ref));
+    arm_set_default_fp_behaviours(&ref);
+    set_float_rounding_mode(float_round_nearest_even, &ref);
+
+    for (t = 0; t < ARRAY_SIZE(nfp_tests); t++) {
+        int      es   = nfp_tests[t].esize;
+        unsigned nval = es == 8 ? ARRAY_SIZE(nfp_test_d) : ARRAY_SIZE(nfp_test_s);
+        unsigned nk   = nfp_tests[t].addend ? nval : 1;
+
+        for (int sz = 16; sz >= (es == 4 ? 8 : 16); sz -= 8) {
+        for (i = 0; i < nval; i++) {
+            for (j = 0; j < nval; j++) {
+                for (k = 0; k < nk; k++) {
+                    uint64_t a = es == 8 ? nfp_test_d[i] : nfp_test_s[i];
+                    uint64_t b = es == 8 ? nfp_test_d[j] : nfp_test_s[j];
+                    uint64_t c = es == 8 ? nfp_test_d[k] : nfp_test_s[k];
+                    uint64_t n[2], m[2], dref[4] = {0}, dnat[2];
+                    uint64_t host;
+                    uint32_t want;
+
+                    nfp_fill(n, es, a);
+                    nfp_fill(m, es, b);
+                    nfp_fill(dref, es, c);
+                    nfp_fill(dnat, es, c);
+                    set_float_exception_flags(0, &ref);
+                    nfp_tests[t].helper(dref, n, m, &ref, simd_desc(sz, sz, 0));
+                    want = nfp_float_flags_to_fpsr(get_float_exception_flags(&ref));
+
+                    asm volatile("msr fpsr, xzr" ::: "memory");
+                    nfp_tests[t].kernel(dnat, n, m, sz);
+                    asm volatile("mrs %0, fpsr" : "=r"(host)::"memory");
+                    host &= 0x1f;
+                    count++;
+                    if (memcmp(dref, dnat, sz) != 0 || host != want) {
+                        snprintf(msg, sizeof(msg),
+                                 "%s/%d(n=0x%" PRIx64 ", m=0x%" PRIx64 ", d=0x%" PRIx64 "): host 0x%" PRIx64
+                                 " fpsr 0x%" PRIx64 ", softfloat 0x%" PRIx64 " fpsr 0x%x",
+                                 nfp_tests[t].name, sz, a, b, c, dnat[0], host, dref[0], want);
+                        *ncases = count;
+                        return msg;
+                    }
+                }
+            }
+        }
+        }
+    }
+    *ncases = count;
+    return NULL;
+}
+#endif

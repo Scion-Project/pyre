@@ -45,6 +45,7 @@
 #include "cpregs.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
+#include "native-fp.h"
 
 static void arm_cpu_set_pc(CPUState* cs, vaddr value)
 {
@@ -1030,6 +1031,8 @@ static void arm_cpu_realizefn(DeviceState* dev, Error** errp)
 #ifdef CONFIG_TCG
     /* Use pc-relative instructions in system-mode */
     tcg_cflags_set(cs, CF_PCREL);
+    /* -accel tcg,native-fp=on: decide once, before any vCPU runs. */
+    if (tcg_enabled()) { arm_native_fp_init(); }
 #endif
 
     /* If we needed to query the host kernel for the CPU features
@@ -1489,6 +1492,16 @@ static vaddr aprofile_pointer_wrap(CPUState* cs, int mmu_idx, vaddr result, vadd
     return result;
 }
 
+static void arm_cpu_exec_enter(CPUState* cs)
+{
+    if (arm_native_fp_on) { arm_native_fp_exec_enter(cpu_env(cs)); }
+}
+
+static void arm_cpu_exec_exit(CPUState* cs)
+{
+    if (arm_native_fp_on) { arm_native_fp_exec_exit(cpu_env(cs)); }
+}
+
 static const TCGCPUOps arm_tcg_ops = {
     .mttcg_supported = true,
     /* ARM processors have a weak memory model */
@@ -1503,6 +1516,8 @@ static const TCGCPUOps arm_tcg_ops = {
     .mmu_index                 = arm_cpu_mmu_index,
     .tlb_fill_align            = arm_cpu_tlb_fill_align,
     .pointer_wrap              = aprofile_pointer_wrap,
+    .cpu_exec_enter            = arm_cpu_exec_enter,
+    .cpu_exec_exit             = arm_cpu_exec_exit,
     .cpu_exec_interrupt        = arm_cpu_exec_interrupt,
     .cpu_exec_halt             = arm_cpu_exec_halt,
     .cpu_exec_reset            = cpu_reset,
