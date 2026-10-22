@@ -22,6 +22,7 @@
 #include "qemu/lockable.h"
 #include "qemu/main-loop.h"
 #include "hw/arm/sep/private.h"
+#include "trace.h"
 
 // T8030, but there's no overlap when the size is bigger
 // #define PKA_BASE_REG_SIZE (0x4000)
@@ -253,6 +254,7 @@ static uint64_t pka_tmm_reg_read(void* opaque, hwaddr addr, unsigned size)
     switch (addr) {
         case 0x818 ... 0x834:
             // TODO
+            trace_apple_sep_pka_tmm_unmodelled_read(addr, ret);
             goto jump_log;
         default:
         jump_default:

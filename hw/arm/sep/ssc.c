@@ -36,6 +36,7 @@
 #include <nettle/hkdf.h>
 #include <nettle/hmac.h>
 #include <nettle/knuth-lfib.h>
+#include "trace.h"
 
 #define KBKDF_CMAC_OUTPUT_LEN   (0x48)
 #define AES_CCM_NONCE_LENGTH    (12)
@@ -625,7 +626,9 @@ static void answer_cmd_0x1_connect_sp(struct AppleSEPSSCState* ssc_state, uint8_
     HEXDUMP("answer_cmd_0x1_connect_sp: req_prefix", request, MSG_PREFIX_LENGTH);
     HEXDUMP("answer_cmd_0x1_connect_sp: sw_public_xy2", sw_public_xy2, SECP384_PUBLIC_XY_SIZE);
     HEXDUMP("answer_cmd_0x1_connect_sp: cmac_req_should", cmac_req_should, AES_BLOCK_SIZE);
-    if (is_keyslot_valid(ssc_state, kbkdf_index)) {    // shouldn't already exist
+    // The slot index is a full byte; refuse slots past the modelled table
+    // instead of deriving keys into memory beyond it.
+    if (kbkdf_index >= KBKDF_KEY_MAX_SLOTS || is_keyslot_valid(ssc_state, kbkdf_index)) {
         DPRINTF("%s: invalid kbkdf_index: %u\n", __func__, kbkdf_index);
         do_response_prefix(request, response, SSC_RESPONSE_FLAG_KEYSLOT_INVALID);
         return;
@@ -965,6 +968,7 @@ static uint8_t apple_sep_ssc_rx(I2CSlave* i2c)
     // This tries to prevent a spurious call during a dummy read.
     if (ssc->resp_cur == 1) {
         uint8_t cmd = ssc->req_cmd[0];
+        trace_apple_sep_ssc_cmd(cmd, ssc->req_cmd[1], ssc->req_cmd[2], ssc->req_cmd[3], ssc->req_cur);
         if (cmd > 0x09) {
             qemu_log_mask(LOG_GUEST_ERROR, "%s: cmd %u: invalid command > 0x09", __func__, cmd);
             do_response_prefix(ssc->req_cmd, ssc->resp_cmd, SSC_RESPONSE_FLAG_COMMAND_OR_FIELD_INVALID);
@@ -1006,6 +1010,7 @@ static uint8_t apple_sep_ssc_rx(I2CSlave* i2c)
         else if (cmd == 0x09) {    // req 0x04 bytes, resp 0x2F bytes
             answer_cmd_0x9_panic(ssc, ssc->req_cmd, ssc->resp_cmd);
         }
+        trace_apple_sep_ssc_resp(cmd, ssc->resp_cmd[3]);
         ssc->req_cur = 0;
         memset(ssc->req_cmd, 0, sizeof(ssc->req_cmd));
         HEXDUMP("apple_sep_ssc_rx: before resp_cmd invalid check", ssc->resp_cmd, sizeof(ssc->resp_cmd));

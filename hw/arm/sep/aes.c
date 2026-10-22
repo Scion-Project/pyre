@@ -25,6 +25,7 @@
 #include "qemu/lockable.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
+#include "trace.h"
 
 #define AESC_BASE_REG_SIZE (0x4000)     // S8000
 #define AESS_BASE_REG_SIZE (0x10000)    // T8015/T8030
@@ -371,6 +372,8 @@ static void apple_sep_aess_handle_cmd(AppleSEPAESSState* s)
     bool register_0x18_KEYDISABLE_BIT_INVALID = check_register_0x18_KEYDISABLE_BIT_INVALID(cmd, reg_0x18_keydisable);
     bool valid_command                        = true;
     bool invalid_parameters                   = register_0x18_KEYDISABLE_BIT_INVALID;
+
+    trace_apple_sep_aess_cmd(cmd, normalized_cmd);
 #if 1
     // not correct behavior, but SEPFW likes to complain if it doesn't expect
     // the output to be zero, so keep it.
@@ -567,6 +570,7 @@ static void apple_sep_aess_handle_cmd(AppleSEPAESSState* s)
 #endif
     else {
         DPRINTF("SEP AESS_BASE: %s: Unknown command 0x%02x\n", __func__, cmd);
+        trace_apple_sep_aess_cmd_unknown(cmd, normalized_cmd);
         // valid_command = false;
     }
 
@@ -578,6 +582,7 @@ jump_return:
         invalid_parameters |= !valid_command;
         if (invalid_parameters) {
             // always keep this flag
+            trace_apple_sep_aess_cmd_error(cmd);
             s->interrupt_status |= SEP_AESS_REGISTER_INTERRUPT_STATUS_UNRECOVERABLE_ERROR_INTERRUPT;
             qemu_log_mask(LOG_GUEST_ERROR,
                           "%s: unrecoverable_error just got raised, SEP will "
