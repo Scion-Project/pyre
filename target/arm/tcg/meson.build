@@ -37,6 +37,7 @@ arm_ss.add(when: 'TARGET_AARCH64', if_true: files(
   'translate-sve.c',
   'translate-sme.c',
   'helper-a64.c',
+  'native_fp_test.c',
   'mte_helper.c',
   'pauth_helper.c',
   'sme_helper.c',

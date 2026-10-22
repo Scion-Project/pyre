@@ -2,14 +2,21 @@
  * fp_native_check.S - bit-exactness check for -accel tcg,native-fp=on
  * (guest FP executed on the host FPU, docs/NATIVE-FP.md).
  *
- * Runs every covered operation over all (a, b, c) triples of a table of
- * special operands (signed zeros, smallest/largest denormal, smallest normal,
- * max, infinities, quiet and signalling NaNs with payloads, ordinary values),
- * per precision, and folds the result bits and the FPSR after each operation
- * into a 64-bit FNV-style hash. The whole run is repeated under several FPCR
- * modes (native-compatible FPCR = 0, then FZ, DN, directed rounding, FZ|DN,
- * then FPCR = 0 again), so switching between the host-FPU and softfloat
- * regimes is covered too.
+ * Runs every covered operation over special operands (signed zeros,
+ * smallest/largest denormal, smallest normal, max, infinities, quiet and
+ * signalling NaNs with payloads, ordinary values; plus ties and
+ * integer-range boundaries for the conversions) and folds the result bits
+ * (the integer result, or NZCV for compares) and the FPSR after each
+ * operation into a 64-bit FNV-style hash:
+ *   - all (a, b, c) triples: vector FADD/FSUB/FMUL/FMLA/FMLS (.2d/.4s/.2s),
+ *     scalar FMADD/FMSUB/FNMADD/FNMSUB, FMLA/FMLS by element;
+ *   - all (a, b) pairs: vector FDIV/FMIN/FMAX/FMINNM/FMAXNM/FABD/FCMEQ/
+ *     FCMGE/FCMGT and FMUL by element (every index), scalar FADD/FSUB/FMUL/
+ *     FDIV/FMIN/FMAX/FMINNM/FMAXNM/FSQRT/FCVT, FCMP/FCMPE,
+ *     FCVT{Z,N,A,P,M}{S,U} to W/X, SCVTF/UCVTF from W/X.
+ * The whole run is repeated under several FPCR modes (native-compatible
+ * FPCR = 0, then FZ, DN, directed rounding, FZ|DN, then FPCR = 0 again), so
+ * switching between the host-FPU and softfloat regimes is covered too.
  *
  * The expected hash below is the softfloat (native-fp=off) result. The test
  * prints the hash on the test-control PUTC register, then reports PASS if it
@@ -31,10 +38,10 @@
  */
 #ifdef STICKY
 #define CLEAR_FPSR nop
-#define GOLDEN     0xff2aba1fe8b66497
+#define GOLDEN     0xc6159aad366011df
 #else
 #define CLEAR_FPSR msr fpsr, xzr
-#define GOLDEN     0xcab9271bfc0dd5ab
+#define GOLDEN     0xe421108006d5ca6e
 #endif
     .set CTL_BASE,    0x200000000
     .set CTL_DETAIL,  0x00
@@ -44,6 +51,8 @@
     .set FAIL_BASE,   0x46000000
     .set NDBL, 20
     .set NSGL, 20
+    .set NDCVT, 12
+    .set NSCVT, 12
 
 /* 64-bit immediate without a literal pool (works for ELF and Mach-O) */
 .macro MOVQ reg, imm
@@ -51,6 +60,25 @@
     movk    \reg, #(((\imm) >> 16) & 0xffff), lsl #16
     movk    \reg, #(((\imm) >> 32) & 0xffff), lsl #32
     movk    \reg, #(((\imm) >> 48) & 0xffff), lsl #48
+.endm
+
+/* run one operation and fold its result (v3, or x8) and the FPSR into the hash */
+.macro V3 insn:vararg
+    CLEAR_FPSR
+    \insn
+    bl      mix_v3
+.endm
+.macro X8 insn:vararg
+    CLEAR_FPSR
+    \insn
+    bl      mix_x8
+.endm
+/* compares: NZCV as the result */
+.macro NZ insn:vararg
+    CLEAR_FPSR
+    \insn
+    mrs     x8, nzcv
+    bl      mix_x8
 .endm
 
     .text
@@ -95,6 +123,8 @@ fpc_body:
     msr     fpcr, x0
     bl      run_dbl
     bl      run_sgl
+    bl      run_dbl2
+    bl      run_sgl2
     subs    x22, x22, #1
     b.ne    0b
     msr     fpcr, xzr
@@ -163,6 +193,13 @@ run_dbl:
     \op    v3.2d, v0.2d, v1.2d
     bl      mix_v3
     .endr
+    .irp op, fmadd, fmsub, fnmadd, fnmsub
+    V3      \op d3, d0, d1, d2
+    .endr
+    mov     v3.16b, v2.16b
+    V3      fmla v3.2d, v0.2d, v1.d[1]
+    mov     v3.16b, v2.16b
+    V3      fmls v3.2d, v0.2d, v1.d[0]
     add     x14, x14, #1
     cmp     x14, x11
     b.ne    3b
@@ -212,6 +249,13 @@ run_sgl:
     \op    v3.2s, v1.2s, v2.2s
     bl      mix_v3
     .endr
+    .irp op, fmadd, fmsub, fnmadd, fnmsub
+    V3      \op s3, s0, s1, s2
+    .endr
+    mov     v3.16b, v2.16b
+    V3      fmla v3.4s, v0.4s, v1.s[2]
+    mov     v3.16b, v2.16b
+    V3      fmls v3.2s, v0.2s, v1.s[3]
     add     x14, x14, #1
     cmp     x14, x11
     b.ne    6b
@@ -222,6 +266,109 @@ run_sgl:
     cmp     x12, x11
     b.ne    4b
     ret     x23
+
+/*
+ * Binary/unary operations over all (a, b) pairs of the table plus the
+ * conversion operands: vector .2d with v0 = {a, b}, v1 = {b, a}; scalar
+ * with d0 = a, d1 = b; integer conversions of a, and of a's raw bits.
+ */
+run_dbl2:
+    mov     x23, x30
+    adr     x10, dtab
+    mov     x11, #(NDBL + NDCVT)
+    mov     x12, #0
+1:  mov     x13, #0
+2:  ldr     d0, [x10, x12, lsl #3]
+    ldr     d1, [x10, x13, lsl #3]
+    mov     v0.d[1], v1.d[0]
+    mov     v1.d[1], v0.d[0]
+    .irp op, fdiv, fmin, fmax, fminnm, fmaxnm, fabd, fcmeq, fcmge, fcmgt
+    V3      \op v3.2d, v0.2d, v1.2d
+    .endr
+    V3      fmul v3.2d, v0.2d, v1.d[0]
+    V3      fmul v3.2d, v0.2d, v1.d[1]
+    .irp op, fadd, fsub, fmul, fdiv, fmin, fmax, fminnm, fmaxnm
+    V3      \op d3, d0, d1
+    .endr
+    NZ      fcmp d0, d1
+    NZ      fcmpe d0, d1
+    V3      fsqrt d3, d0
+    V3      fcvt s3, d0
+    .irp op, fcvtzs, fcvtns, fcvtas, fcvtps, fcvtms, fcvtzu, fcvtnu, fcvtau, fcvtpu, fcvtmu
+    X8      \op x8, d0
+    X8      \op w8, d0
+    .endr
+    fmov    x15, d0
+    .irp op, scvtf, ucvtf
+    V3      \op d3, x15
+    V3      \op s3, x15
+    V3      \op d3, w15
+    .endr
+    add     x13, x13, #1
+    cmp     x13, x11
+    b.ne    2b
+    add     x12, x12, #1
+    cmp     x12, x11
+    b.ne    1b
+    ret     x23
+
+/* single precision: v0 = {a, b, b, a}, v1 = {b, a, a, b}; s0 = a, s1 = b */
+run_sgl2:
+    mov     x23, x30
+    adr     x10, stab
+    mov     x11, #(NSGL + NSCVT)
+    mov     x12, #0
+1:  mov     x13, #0
+2:  ldr     s0, [x10, x12, lsl #2]
+    ldr     s1, [x10, x13, lsl #2]
+    dup     v4.4s, v0.s[0]
+    dup     v5.4s, v1.s[0]
+    mov     v4.s[1], v1.s[0]
+    mov     v4.s[2], v1.s[0]
+    mov     v5.s[1], v0.s[0]
+    mov     v5.s[2], v0.s[0]
+    mov     v0.16b, v4.16b
+    mov     v1.16b, v5.16b
+    .irp op, fdiv, fmin, fmax, fminnm, fmaxnm, fabd, fcmeq, fcmge, fcmgt
+    V3      \op v3.4s, v0.4s, v1.4s
+    V3      \op v3.2s, v1.2s, v0.2s
+    .endr
+    .irp ix, 0, 1, 2, 3
+    V3      fmul v3.4s, v0.4s, v1.s[\ix]
+    .endr
+    V3      fmul v3.2s, v0.2s, v1.s[2]
+    .irp op, fadd, fsub, fmul, fdiv, fmin, fmax, fminnm, fmaxnm
+    V3      \op s3, s0, s1
+    .endr
+    NZ      fcmp s0, s1
+    NZ      fcmpe s0, s1
+    V3      fsqrt s3, s0
+    V3      fcvt d3, s0
+    .irp op, fcvtzs, fcvtns, fcvtas, fcvtps, fcvtms, fcvtzu, fcvtnu, fcvtau, fcvtpu, fcvtmu
+    X8      \op x8, s0
+    X8      \op w8, s0
+    .endr
+    fmov    w15, s0
+    .irp op, scvtf, ucvtf
+    V3      \op s3, w15
+    V3      \op d3, w15
+    .endr
+    add     x13, x13, #1
+    cmp     x13, x11
+    b.ne    2b
+    add     x12, x12, #1
+    cmp     x12, x11
+    b.ne    1b
+    ret     x23
+
+/* hash ^= x8, fpsr */
+mix_x8:
+    mrs     x9, fpsr
+    eor     x19, x19, x8
+    mul     x19, x19, x24
+    eor     x19, x19, x9
+    mul     x19, x19, x24
+    ret
 
 /* hash ^= v3.d[0], v3.d[1], fpsr (each followed by *= prime) */
 mix_v3:
@@ -249,12 +396,21 @@ dtab:
     .quad 0x7ff8000000000000, 0xfff8000000000123, 0x7ff0000000000456, 0x7ff4000000000789
     .quad 0x3ff0000000000000, 0xbff8000000000000, 0x3fb999999999999a, 0x4340000000000001
     .quad 0x3cb0000000000000, 0x7fe0000000000000, 0x0008000000000000, 0xc00921fb54442d18
+/* conversion operands (pair loop only): ties, integer-range boundaries */
+dcvt:
+    .quad 0x4004000000000000, 0xc004000000000000, 0x3fe0000000000000, 0xbfe0000000000000
+    .quad 0x3ff8000000000000, 0x41e0000000000000, 0x41dfffffffe00000, 0xc1e0000000200000
+    .quad 0x41f0000000000000, 0x43e0000000000000, 0xc3e0000000000000, 0x43f0000000000000
 stab:
     .long 0x00000000, 0x80000000, 0x00000001, 0x807fffff
     .long 0x00800000, 0x7f7fffff, 0x7f800000, 0xff800000
     .long 0x7fc00000, 0xffc00123, 0x7f800456, 0x7fa00789
     .long 0x3f800000, 0xbfc00000, 0x3dcccccd, 0x4b000001
     .long 0x33800000, 0x7f000000, 0x00400000, 0xc0490fdb
+scvt:
+    .long 0x40200000, 0xc0200000, 0x3f000000, 0xbf000000
+    .long 0x3fc00000, 0x4f000000, 0xcf000000, 0x4f800000
+    .long 0x5f000000, 0xdf000000, 0x5f800000, 0x4b7fffff
 #ifndef HOST_HARNESS
     .ltorg
 #endif

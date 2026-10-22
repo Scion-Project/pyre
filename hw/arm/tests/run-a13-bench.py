@@ -40,6 +40,7 @@ WORKLOADS = [
     ("w5", ["-DWORKLOAD=5", "-DITERS=4000000"], "as w2 + 62.5k TB invalidations"),
     ("w6", ["-DWORKLOAD=6", "-DITERS=5000000"], "40M MSR TPIDR_EL1/ELR_EL1"),
     ("w7", ["-DWORKLOAD=7", "-DITERS=2000000"], "48M vector FMLA/FMUL/FADD (.4s/.2d)"),
+    ("w8", ["-DWORKLOAD=8", "-DITERS=2000000"], "40M scalar FP (FMADD/FDIV/FSQRT/FCMP/FCVTZS/SCVTF)"),
 ]
 
 
@@ -54,7 +55,11 @@ def build(name, defines, workdir):
 
 
 def run(qemu, img):
+    """QEMU may carry TCG options after '@', e.g. build/qemu-system-aarch64@native-fp=on."""
+    qemu, _, accel = qemu.partition("@")
     cmd = [qemu, "-M", "a13-test", "-display", "none", "-monitor", "none", "-serial", "none", "-kernel", img]
+    if accel:
+        cmd += ["-accel", "tcg," + accel]
     t = time.monotonic()
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
     dt = time.monotonic() - t
@@ -67,7 +72,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--only", help="comma-separated workload names")
-    ap.add_argument("qemu", nargs="+", metavar="NAME=QEMU")
+    ap.add_argument("qemu", nargs="+", metavar="NAME=QEMU[@TCGOPTS]")
     a = ap.parse_args()
     bins = [q.split("=", 1) if "=" in q else (q, q) for q in a.qemu]
     loads = [w for w in WORKLOADS if not a.only or w[0] in a.only.split(",")]
