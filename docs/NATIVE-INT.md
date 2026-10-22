@@ -42,7 +42,9 @@ EL0, AArch64, little-endian data, no single step, no BTI, no MTE:
 |---|---|
 | data processing | ADD/SUB(S) immediate, shifted and extended register; AND/ORR/EOR/ANDS (immediate) and the shifted-register logical forms; MOVZ/MOVN/MOVK; SBFM/UBFM/BFM; EXTR; MADD/MSUB/SMADDL/SMSUBL/UMADDL/UMSUBL/SMULH/UMULH; UDIV/SDIV; LSLV/LSRV/ASRV/RORV; RBIT/REV16/REV32/REV/CLZ/CLS; ADC/SBC(S); CCMP/CCMN; CSEL/CSINC/CSINV/CSNEG |
 | PC-relative | ADR, ADRP |
-| loads/stores | LDR/STR of general-purpose registers: unsigned and unscaled offsets, pre/post-index, register offset, sign-extending loads; LDP/STP/LDPSW |
+| loads/stores | LDR/STR of general-purpose registers: unsigned and unscaled offsets, pre/post-index, register offset, sign-extending loads; LDP/STP/LDPSW; LDR (literal) |
+| SIMD&FP loads/stores | LDR/STR of B/H/S/D/Q registers (same addressing modes), LDP/STP of S/D/Q registers, LDR (literal); no SVE/SME. The data goes through the CPU state (vector registers are not mapped) |
+| system registers | MRS of plain 64-bit fields with no access check (TPIDR_EL0, TPIDRRO_EL0) |
 | branches | B.cond (when the guest flags are already in the host flags), CBZ/CBNZ, TBZ/TBNZ (inside a region) |
 
 Everything else stays on the existing paths, in particular system registers,

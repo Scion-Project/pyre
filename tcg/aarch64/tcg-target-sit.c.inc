@@ -323,16 +323,17 @@ static void sit_addpc(TCGContext* s, const SitInsn* si)
 
 /*
  * The softmmu TLB fast path for the guest address in @addr, as
- * prepare_host_addr() but flag-free: leaves the host address addend in
- * SIT_S1 and returns the CBNZ to patch with the slow path.
+ * prepare_host_addr() but flag-free, for an access of @span bytes with the
+ * atomicity and alignment of @oi: leaves the host address addend in SIT_S1
+ * and returns the CBNZ to patch with the slow path.
  */
-static tcg_insn_unit* sit_tlb(TCGContext* s, TCGReg addr, MemOpIdx oi, bool is_ld)
+static tcg_insn_unit* sit_tlb(TCGContext* s, TCGReg addr, MemOpIdx oi, bool is_ld, unsigned span)
 {
     MemOp        opc    = get_memop(oi);
     MemOp        s_bits = opc & MO_SIZE;
     TCGAtomAlign aa = atom_and_align_for_opc(s, opc, have_lse2 ? MO_ATOM_WITHIN16 : MO_ATOM_IFALIGN, s_bits == MO_128);
     unsigned     a_mask = (1 << aa.align) - 1;
-    unsigned     s_mask = (1u << s_bits) - 1;
+    unsigned     s_mask = span - 1;
     int          fast_ofs = tlb_mask_table_ofs(s, get_mmuidx(oi));
     uint64_t     compare_mask = (uint64_t)TARGET_PAGE_MASK | a_mask;
     tcg_insn_unit* label_ptr;
@@ -372,20 +373,51 @@ static AArch64Insn sit_ld_insn(const SitInsn* si)
     }
 }
 
+static inline bool sit_is_vec(const SitInsn* si) { return si->kind >= SIT_LDV && si->kind <= SIT_STPV; }
+
+static inline bool sit_is_load(const SitInsn* si)
+{ return si->kind == SIT_LD || si->kind == SIT_LDP || si->kind == SIT_LDV || si->kind == SIT_LDPV; }
+
+static inline bool sit_is_pair(const SitInsn* si)
+{ return si->kind == SIT_LDP || si->kind == SIT_STP || si->kind == SIT_LDPV || si->kind == SIT_STPV; }
+
+/* The CPU state offset of guest vector register @v (its low 128 bits; little-endian). */
+static inline int sit_vofs(TCGContext* s, int v) { return s->sit->lay->vregs + s->sit->lay->vstride * v; }
+
+/* LDR/STR of 1 << @size bytes of a vector register (C3.3.12 form; size 4 is Q). */
+static AArch64Insn sit_vldst_insn(unsigned size, bool is_ld)
+{
+    unsigned opc = size == 4 ? (is_ld ? 3 : 2) : (is_ld ? 1 : 0);
+
+    return 0x3c000000u | (size & 3) << 30 | opc << 22;
+}
+
+/* Host vector scratch for vector loads and stores (TCG holds nothing in a region). */
+#define SIT_V0 TCG_REG_V31
+#define SIT_V1 TCG_REG_V30
+
 static void sit_ldst(TCGContext* s, const SitInsn* si)
 {
     static const AArch64Insn st[4] = {I3312_STRB, I3312_STRH, I3312_STRW, I3312_STRX};
     SitMap*  m     = &s->sit->m;
-    bool     is_ld = si->kind == SIT_LD || si->kind == SIT_LDP;
-    bool     pair  = si->kind == SIT_LDP || si->kind == SIT_STP;
-    uint32_t keep  = sit_bit(si->rn) | sit_bit(si->rt) | (pair ? sit_bit(si->rt2) : 0);
-    TCGReg   hn, hm = TCG_REG_XZR, ht, ht2 = TCG_REG_XZR, addr;
+    bool     vec   = sit_is_vec(si);
+    bool     is_ld = sit_is_load(si);
+    bool     pair  = sit_is_pair(si);
+    unsigned span  = (pair ? 2 : 1) << si->size;
+    uint32_t keep  = 0;
+    TCGReg   hn = TCG_REG_XZR, hm = TCG_REG_XZR, ht, ht2 = TCG_REG_XZR, addr;
     SitSlow* sp;
 
+    if (si->mode != SIT_AM_PC) { keep |= sit_bit(si->rn); }
     if (si->mode == SIT_AM_REG) { keep |= sit_bit(si->rm); }
-    hn = sit_use(s, si->rn, keep);
+    if (!vec) { keep |= sit_bit(si->rt) | (pair ? sit_bit(si->rt2) : 0); }
+    if (si->mode != SIT_AM_PC) { hn = sit_use(s, si->rn, keep); }
     if (si->mode == SIT_AM_REG) { hm = sit_use(s, si->rm, keep); }
-    if (is_ld) {
+    if (vec) {
+        ht  = SIT_V0;
+        ht2 = SIT_V1;
+    }
+    else if (is_ld) {
         ht = sit_def(s, si->rt, keep);
         if (pair) { ht2 = sit_def(s, si->rt2, keep); }
     }
@@ -417,10 +449,25 @@ static void sit_ldst(TCGContext* s, const SitInsn* si)
             addr = SIT_S3;
             tcg_out32(s, 0x8b200000u | hm << 16 | si->ext_opt << 13 | si->ext_shift << 10 | hn << 5 | addr);
             break;
+        case SIT_AM_PC:
+            addr = SIT_S3;
+            if (si->pcrel) {
+                tcg_out_ldst(s, I3312_LDRX, addr, TCG_AREG0, s->sit->lay->pc, 3);
+                sit_addi(s, addr, addr, si->imm);
+            }
+            else {
+                tcg_out_movi(s, TCG_TYPE_I64, addr, si->imm);
+            }
+            break;
         default: g_assert_not_reached();
     }
+    if (vec && !is_ld) {
+        /* the data, from the CPU state (the TLB check below leaves vector registers alone) */
+        tcg_out_ldst(s, I3312_LDRVQ, SIT_V0, TCG_AREG0, sit_vofs(s, si->rt), 4);
+        if (pair) { tcg_out_ldst(s, I3312_LDRVQ, SIT_V1, TCG_AREG0, sit_vofs(s, si->rt2), 4); }
+    }
     sp->addr      = addr;
-    sp->label_ptr = sit_tlb(s, addr, si->oi, is_ld);
+    sp->label_ptr = sit_tlb(s, addr, si->oi, is_ld, span);
 
     switch (si->kind) {
         case SIT_LD: tcg_out_ldst_r(s, sit_ld_insn(si), ht, SIT_S1, TCG_TYPE_I64, addr); break;
@@ -434,7 +481,27 @@ static void sit_ldst(TCGContext* s, const SitInsn* si)
             tcg_out32(s, opc | (is_ld ? 1u << 22 : 0) | ht2 << 10 | SIT_S1 << 5 | ht);
             break;
         }
+        case SIT_LDV:
+        case SIT_STV: tcg_out_ldst_r(s, sit_vldst_insn(si->size, is_ld), ht, SIT_S1, TCG_TYPE_I64, addr); break;
+        case SIT_LDPV:
+        case SIT_STPV: {
+            /* LDP/STP St/Dt/Qt, [x17] (signed offset 0): opc 0 S, 1 D, 2 Q */
+            uint32_t opc = si->size - 2;
+
+            tcg_out_insn(s, 3502, ADD, TCG_TYPE_I64, SIT_S1, SIT_S1, addr);
+            tcg_out32(s, 0x2d000000u | opc << 30 | (is_ld ? 1u << 22 : 0) | (ht2 & 31) << 10 | SIT_S1 << 5 | (ht & 31));
+            break;
+        }
         default: g_assert_not_reached();
+    }
+    if (vec && is_ld) {
+        /*
+         * To the CPU state: all 128 bits, as the host load zeroed what is above the
+         * access, which is what a guest load into a SIMD&FP register does (no SVE).
+         * The slow path writes the CPU state itself and rejoins after this.
+         */
+        tcg_out_ldst(s, I3312_STRVQ, SIT_V0, TCG_AREG0, sit_vofs(s, si->rt), 4);
+        if (pair) { tcg_out_ldst(s, I3312_STRVQ, SIT_V1, TCG_AREG0, sit_vofs(s, si->rt2), 4); }
     }
     sp->raddr = tcg_splitwx_to_rx(s->code_ptr);
     QSIMPLEQ_INSERT_TAIL(&s->sit->slow, sp, next);
@@ -443,7 +510,7 @@ static void sit_ldst(TCGContext* s, const SitInsn* si)
         sit_addi(s, hn, hn, si->imm);
         sit_dirty(s, si->rn);
     }
-    if (is_ld) {
+    if (is_ld && !vec) {
         sit_dirty(s, si->rt);
         if (pair) { sit_dirty(s, si->rt2); }
     }
@@ -486,7 +553,11 @@ static void tcg_out_sit(TCGContext* s, const SitInsn* si, TCGLabel* l)
         case SIT_LD   :
         case SIT_ST   :
         case SIT_LDP  :
-        case SIT_STP  : sit_ldst(s, si); break;
+        case SIT_STP  :
+        case SIT_LDV  :
+        case SIT_STV  :
+        case SIT_LDPV :
+        case SIT_STPV : sit_ldst(s, si); break;
         case SIT_BCOND:
         case SIT_CBZ  :
         case SIT_TBZ  : sit_branch(s, si, l); break;
@@ -494,25 +565,77 @@ static void tcg_out_sit(TCGContext* s, const SitInsn* si, TCGLabel* l)
     }
 }
 
+/* x1 = guest address, x2... = data, then oi and the return address; call the TCG helper. */
+static void sit_slow_call(TCGContext* s, const SitSlow* sp, MemOp mop, bool is_ld, TCGReg data_hi_used)
+{
+    TCGReg next = is_ld ? TCG_REG_X2 : data_hi_used;
+
+    tcg_out_movi(s, TCG_TYPE_I32, next, sp->si->oi);
+    tcg_out_movi(s, TCG_TYPE_PTR, next + 1, (uintptr_t)sp->raddr);
+    tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
+    tcg_out_call_int(s, is_ld ? qemu_ld_helpers[mop & MO_SSIZE] : qemu_st_helpers[mop & MO_SIZE]);
+}
+
+/* Guest vector register @v (low 128 bits) = x0 (and x1 if @wide, else zero above 64 bits). */
+static void sit_slow_vset(TCGContext* s, int v, bool wide)
+{
+    int o = sit_vofs(s, v);
+
+    tcg_out_ldst(s, I3312_STRX, TCG_REG_X0, TCG_AREG0, o, 3);
+    tcg_out_ldst(s, I3312_STRX, wide ? TCG_REG_X1 : TCG_REG_XZR, TCG_AREG0, o + 8, 3);
+}
+
+/*
+ * A vector load or store in the slow path: one helper call per register.
+ * The address of the second register is kept in the outgoing-argument area of
+ * the TCG frame across the first call.
+ */
+static void sit_slow_vec(TCGContext* s, const SitSlow* sp)
+{
+    const SitInsn* si    = sp->si;
+    MemOp          mop   = get_memop(si->oi);
+    bool           is_ld = sit_is_load(si);
+    bool           wide  = si->size == 4;
+    int            n     = sit_is_pair(si) ? 2 : 1;
+
+    tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, sp->addr);
+    if (n == 2) { tcg_out_ldst(s, I3312_STRX, TCG_REG_X1, TCG_REG_SP, 0, 3); }
+    for (int i = 0; i < n; i++) {
+        int v = i ? si->rt2 : si->rt;
+
+        if (i) {
+            tcg_out_ldst(s, I3312_LDRX, TCG_REG_X1, TCG_REG_SP, 0, 3);
+            tcg_out_insn(s, 3401, ADDI, TCG_TYPE_I64, TCG_REG_X1, TCG_REG_X1, 1 << si->size);
+        }
+        if (is_ld) {
+            sit_slow_call(s, sp, mop, true, TCG_REG_X2);
+            sit_slow_vset(s, v, wide);
+        }
+        else {
+            tcg_out_ldst(s, I3312_LDRX, TCG_REG_X2, TCG_AREG0, sit_vofs(s, v), 3);
+            if (wide) { tcg_out_ldst(s, I3312_LDRX, TCG_REG_X3, TCG_AREG0, sit_vofs(s, v) + 8, 3); }
+            sit_slow_call(s, sp, mop, false, wide ? TCG_REG_X4 : TCG_REG_X3);
+        }
+    }
+}
+
 /* The out-of-line path of a SIT load or store: the CPU state is made exact, then the TCG helper. */
 static bool sit_slow_out(TCGContext* s, SitSlow* sp)
 {
-    const SitInsn*   si    = sp->si;
-    MemOp            mop   = get_memop(si->oi);
-    bool             is_ld = si->kind == SIT_LD || si->kind == SIT_LDP;
-    uint32_t         reload;
+    const SitInsn* si    = sp->si;
+    MemOp          mop   = get_memop(si->oi);
+    bool           is_ld = sit_is_load(si);
+    uint32_t       reload;
 
     if (!reloc_pc19(sp->label_ptr, tcg_splitwx_to_rx(s->code_ptr))) { return false; }
 
     if (!tcg_native_int_fault) { sit_writeback(s, &sp->map); }
 
-    /* env, addr, [data], oi, retaddr */
-    if (is_ld) {
+    if (sit_is_vec(si)) { sit_slow_vec(s, sp); }
+    else if (is_ld) {
+        /* env, addr, oi, retaddr */
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, sp->addr);
-        tcg_out_movi(s, TCG_TYPE_I32, TCG_REG_X2, si->oi);
-        tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_X3, (uintptr_t)sp->raddr);
-        tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
-        tcg_out_call_int(s, qemu_ld_helpers[mop & MO_SSIZE]);
+        sit_slow_call(s, sp, mop, true, TCG_REG_X2);
 
         /* Results to the CPU state; the reload below brings them into the data registers. */
         if (si->kind == SIT_LD) {
@@ -538,7 +661,7 @@ static bool sit_slow_out(TCGContext* s, SitSlow* sp)
         }
     }
     else {
-        TCGReg data = TCG_REG_X2;
+        TCGReg next = TCG_REG_X3;
 
         sit_mov(s, SIT_S0, sp->rt);
         if (si->kind == SIT_STP) {
@@ -551,16 +674,13 @@ static bool sit_slow_out(TCGContext* s, SitSlow* sp)
         }
         sit_mov(s, SIT_S1, sp->addr);
         tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X1, SIT_S1);
-        tcg_out_mov(s, TCG_TYPE_I64, data, SIT_S0);
+        tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X2, SIT_S0);
         if (si->kind == SIT_STP && si->size == 3) {
             /* Int128 in x2:x3 (an even pair on Linux, the next two registers on Darwin: the same here) */
             tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_X3, SIT_S2);
-            data = TCG_REG_X3;
+            next = TCG_REG_X4;
         }
-        tcg_out_movi(s, TCG_TYPE_I32, data + 1, si->oi);
-        tcg_out_movi(s, TCG_TYPE_PTR, data + 2, (uintptr_t)sp->raddr);
-        tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
-        tcg_out_call_int(s, qemu_st_helpers[mop & MO_SIZE]);
+        sit_slow_call(s, sp, mop, false, next);
     }
 
     /* Reload what the call clobbered, and the loaded registers. */
@@ -568,7 +688,7 @@ static bool sit_slow_out(TCGContext* s, SitSlow* sp)
     for (int g = 0; g < SIT_NUM_REGS; g++) {
         if (sp->map.host[g] >= 0 && (SIT_CALL_CLOBBERED & (1u << sp->map.host[g]))) { reload |= 1u << g; }
     }
-    if (is_ld) {
+    if (is_ld && !sit_is_vec(si)) {
         reload |= sit_bit(si->rt);
         if (si->kind == SIT_LDP) { reload |= sit_bit(si->rt2); }
     }
