@@ -125,6 +125,8 @@ struct AppleA7IOPMailbox
 void               apple_a7iop_mailbox_update_irq_status(AppleA7IOPMailbox* mailbox);
 void               apple_a7iop_mailbox_update_irq(AppleA7IOPMailbox* mailbox);
 bool               apple_a7iop_mailbox_is_empty(AppleA7IOPMailbox* mailbox);
+/* v4 mailboxes use the "iop,ascwrap-v4" control-register layout (t8101). */
+void               apple_a7iop_mailbox_set_ascwrap_v4(bool on);
 bool               apple_a7iop_mailbox_send_ap(AppleA7IOPMailbox* mailbox, const AppleA7IOPMessage* msg);
 bool               apple_a7iop_mailbox_send_iop(AppleA7IOPMailbox* mailbox, const AppleA7IOPMessage* msg);
 uint32_t           apple_a7iop_mailbox_read_interrupt_status(AppleA7IOPMailbox* mailbox);

@@ -33,6 +33,15 @@
 #define TYPE_APPLE_A13 "apple-a13-cpu"
 OBJECT_DECLARE_TYPE(AppleA13State, AppleA13Class, APPLE_A13)
 
+/*
+ * Apple A14 (Firestorm/Icestorm). Same object as the A13 core with its own
+ * MIDR part numbers and the A14 system-register encodings (a14.c).
+ */
+#define TYPE_APPLE_A14 "apple-a14-cpu"
+
+/* Implementation-defined A14 registers backed as plain storage (a14.c). */
+#define APPLE_A14_IMPDEF_MAX 80
+
 #define TYPE_APPLE_A13_CLUSTER "apple-a13-cluster"
 OBJECT_DECLARE_SIMPLE_TYPE(AppleA13Cluster, APPLE_A13_CLUSTER)
 
@@ -49,6 +58,10 @@ typedef struct AppleA13Class
     /*< public >*/
     DeviceRealize   parent_realize;
     DeviceUnrealize parent_unrealize;
+    /* MIDR_EL1.PartNum of the P and E cores (XNU osfmk/arm/cpuid.h). */
+    uint16_t part_p;
+    uint16_t part_e;
+    bool     a14;
 } AppleA13Class;
 
 typedef struct AppleA13State
@@ -105,6 +118,8 @@ typedef struct AppleA13State
     A13_CPREG_VAR_DEF(UPMPCM);
     A13_CPREG_VAR_DEF(UPMCR0);
     A13_CPREG_VAR_DEF(UPMSR);
+    /* A14 only */
+    uint64_t a14_impdef[APPLE_A14_IMPDEF_MAX];
 } AppleA13State;
 
 typedef struct AppleA13Cluster
@@ -127,7 +142,12 @@ typedef struct AppleA13Cluster
 
 AppleA13State* apple_a13_create(const char* name, uint32_t cpu_id, uint32_t phys_id, uint32_t cluster_id,
                                 uint16_t cluster_type);
+AppleA13State* apple_a13_create_type(const char* type, const char* name, uint32_t cpu_id, uint32_t phys_id,
+                                     uint32_t cluster_id, uint16_t cluster_type);
 AppleA13State* apple_a13_from_node(AppleDTNode* node);
+AppleA13State* apple_a13_from_node_type(AppleDTNode* node, const char* type);
+void           apple_a14_init_cpregs(AppleA13State* acpu);
+void           apple_a14_init_late_cpregs(AppleA13State* acpu);
 bool           apple_a13_is_asleep(const AppleA13State* acpu);
 bool           apple_a13_is_off(const AppleA13State* acpu);
 void           apple_a13_set_on(AppleA13State* acpu);

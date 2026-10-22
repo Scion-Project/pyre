@@ -8,6 +8,7 @@ arm_common_ss.add(when: 'CONFIG_APPLE_SART', if_true: files('sart.c'))
 arm_common_ss.add(when: 'CONFIG_APPLE_SOC', if_true: [liblzfse, files(
     'a13.c',
     'a13-test.c',
+    'a14.c',
     'a13_gxf.c',
     'a9.c',
     'boot.c', # needs liblzfse

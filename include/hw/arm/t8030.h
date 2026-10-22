@@ -31,18 +31,89 @@
 #include "system/kvm.h"
 
 #define TYPE_APPLE_T8030 MACHINE_TYPE_NAME("t8030")
+#define TYPE_APPLE_T8101 MACHINE_TYPE_NAME("t8101")
 
-#define APPLE_T8030(obj) OBJECT_CHECK(AppleT8030MachineState, (obj), TYPE_APPLE_T8030)
+/* Abstract parent of t8030 and t8101: one implementation, per-SoC config. */
+#define TYPE_APPLE_SOC_MACHINE "apple-soc-machine"
+
+#define APPLE_T8030(obj) OBJECT_CHECK(AppleT8030MachineState, (obj), TYPE_APPLE_SOC_MACHINE)
+#define APPLE_T8030_GET_CLASS(obj) ((AppleT8030MachineClass*)MACHINE_GET_CLASS(obj))
+
+/* One device-tree property the machine synthesizes (PMGR tables and such). */
+typedef struct
+{
+    const char* name;
+    const void* data;
+    uint32_t    len;
+} AppleSoCDTProp;
+
+/*
+ * Per-SoC facts the shared t8030.c implementation needs and that the device
+ * tree does not carry. `t8030` and `t8101` are two instances of this table
+ * (see docs/T8101-SCOPE.md section 1.1); everything else comes from the DT.
+ */
+typedef enum
+{
+    APPLE_SOC_T8030, /* A13, iPhone 11 */
+    APPLE_SOC_T8101, /* A14, iPhone 12 */
+} AppleSoCGen;
 
 typedef struct
 {
-    MachineClass parent;
+    AppleSoCGen gen;
+    const char* name;           /* platform-name */
+    const char* desc;           /* MachineClass description */
+    const char* cpu_type;       /* QOM type of the application cores */
+    uint32_t    chip_id;        /* /chosen/chip-id */
+    uint32_t    board_id;       /* /chosen/board-id */
+    uint32_t    chip_revision;  /* arm-io chip-revision and the fuse readback */
+    const char* target_type;    /* root target-type */
+    const char* dev_compatible; /* root compatible ("<MODEL>DEV\0<product>\0AppleARM") */
+    uint32_t    dev_compatible_len;
+    uint32_t    display_scale;
+    uint32_t    disp_width;  /* default panel size */
+    uint32_t    disp_height;
+    const char* regulatory_model; /* default regulatory-model property */
+    bool        real_sep;         /* real SEP (sep-rom/sep-fw) supported */
+
+    /* PMGR: offsets inside the first `pmgr` reg range. */
+    hwaddr   pmgr_cpu_start;  /* write: mask of CPUs to start */
+    hwaddr   pmgr_sep_ps;     /* SEP power state */
+    hwaddr   pmgr_sram_check; /* commonSramCheck read, 0 = none */
+    uint32_t pmgr_sram_check_value;
+    hwaddr   pmgr_ps_lo; /* power-state registers: target state mirrored */
+    hwaddr   pmgr_ps_hi; /* into the actual-state field on write */
+    hwaddr   pmgr_aon_ps_lo; /* absolute arm-io offsets of always-on power-state */
+    hwaddr   pmgr_aon_ps_hi; /* registers in the catch-all ranges, 0 = none */
+    hwaddr   pmp_base;   /* PMP catch-all inside arm-io, 0 = none */
+    hwaddr   pmp_size;
+    const AppleSoCDTProp* pmgr_props; /* synthesized pmgr properties */
+    uint32_t              pmgr_props_count;
+    const AppleSoCDTProp* armio_props; /* synthesized arm-io properties */
+    uint32_t              armio_props_count;
+
+    /* Fixed wiring with no DT description. */
+    uint32_t spi0_irq;
+    uint32_t gpio_spi0_cs;
+    uint32_t gpio_force_dfu;
+    uint32_t dwc2_irq;
+
+    /* arm-io children this machine does not model yet; deleted before boot. */
+    const char* const* rem_nodes;
+    uint32_t           rem_nodes_count;
+} AppleSoCConfig;
+
+typedef struct
+{
+    MachineClass          parent;
+    const AppleSoCConfig* soc;
 } AppleT8030MachineClass;
 
 typedef struct
 {
     MachineState parent;
 
+    const AppleSoCConfig* soc;
     hwaddr          armio_base;
     hwaddr          armio_size;
     unsigned long   dram_size;
