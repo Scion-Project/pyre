@@ -267,6 +267,12 @@ bool tlb_asid_ctx_enabled(void);
 #define TLB_ASID_CTX_DEFAULT_SLOTS 8
 #define TLB_ASID_CTX_MAX_SLOTS     16
 void tlb_asid_ctx_set_slots(unsigned n);
+/*
+ * Smallest size (log2 entries) the dynamic TLB sizing shrinks a TLB to, and
+ * the size of a new one: -accel tcg,x-tlb-bits.
+ */
+#define TLB_FLOOR_BITS_DEFAULT 10
+void tlb_set_floor_bits(unsigned bits);
 
 /* Whether tlb_switch_asid_ctx() also keeps jump caches aside ("x-asid-jc", default on). */
 void tlb_asid_ctx_set_jc(bool on);
