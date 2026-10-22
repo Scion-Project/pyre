@@ -2974,10 +2974,14 @@ static void t8030_create_aop(AppleT8030MachineState* t8030)
     assert_nonnull(dma_mr);
     object_property_add_const_link(OBJECT(aop), "dma-mr", OBJECT(dma_mr));
 
-    // sbd = apple_aop_audio_create(APPLE_AOP(aop));
-    // assert_nonnull(sbd);
-    // object_property_add_child(OBJECT(aop), "aop-audio", OBJECT(sbd));
-    // sysbus_realize_and_unref(sbd, &error_fatal);
+    // The AOP audio service goes with the audio device-tree nodes (audio=on):
+    // a machine without sound gets neither, and the drivers behind them never load.
+    if (t8030->audio) {
+        sbd = apple_aop_audio_create(APPLE_AOP(aop));
+        assert_nonnull(sbd);
+        object_property_add_child(OBJECT(aop), "aop-audio", OBJECT(sbd));
+        sysbus_realize_and_unref(sbd, &error_fatal);
+    }
 
     sysbus_realize_and_unref(aop, &error_fatal);
 }
@@ -3050,6 +3054,102 @@ static void t8030_create_mca(AppleT8030MachineState* t8030)
 
     object_property_add_child(OBJECT(t8030), "mca", OBJECT(sbd));
     sysbus_realize_and_unref(sbd, &error_fatal);
+}
+
+/*
+ * audio=on: every I2S port has a SIO DMA channel, but only the speaker's
+ * (0x7A/0x7B, read by the MCA model) has anything consuming it. The audio
+ * server starts every member of an aggregate at once (codec, hawking,
+ * loopback, the actuator), and a transfer queued on a channel nobody reads
+ * never completes: its IO thread sleeps uninterruptibly in the kernel, the
+ * server misses its RPCs and the watchdog kills it, taking every sound in the
+ * system with it. So the other ports are drained here at about the rate a
+ * real one consumes: playback is taken and dropped, capture gets silence.
+ * From MakrSas/Inferno (branch ios, "audio: give the guest an output route").
+ */
+#define AUDIO_DRAIN_INTERVAL_NS (5 * SCALE_MS)
+#define AUDIO_DRAIN_BYTES       (48000 * 2 * 2 / 200)
+#define AUDIO_DRAIN_MAX_PORTS   (16)
+#define AUDIO_DRAIN_SKIP_TX     (0x7A)
+#define AUDIO_DRAIN_SKIP_RX     (0x7B)
+
+static const char* AUDIO_I2S_NODES[] = {
+    "arm-io/mca0/mca0a", "arm-io/mca0/mca0b", "arm-io/mca1/mca1a", "arm-io/mca1/mca1b",
+    "arm-io/mca2/mca2a", "arm-io/mca2/mca2b", "arm-io/mca3/mca3a", "arm-io/mca3/mca3b",
+    "arm-io/mca4/mca4a", "arm-io/mca4/mca4b", "arm-io/mca5/mca5a", "arm-io/mca5/mca5b",
+    "arm-io/alc0",       "arm-io/alc1",       "arm-io/alc2",       "arm-io/alc3",
+};
+
+typedef struct
+{
+    AppleSIODMAEndpoint* tx[AUDIO_DRAIN_MAX_PORTS];
+    AppleSIODMAEndpoint* rx[AUDIO_DRAIN_MAX_PORTS];
+    size_t               count;
+    QEMUTimer*           timer;
+} T8030AudioDrain;
+
+static void t8030_audio_drain(void* opaque)
+{
+    T8030AudioDrain* drain = opaque;
+    uint8_t          buffer[AUDIO_DRAIN_BYTES];
+    size_t           i;
+
+    for (i = 0; i < drain->count; i++) {
+        if (drain->tx[i] != NULL) { apple_sio_dma_read(drain->tx[i], buffer, sizeof(buffer)); }
+        if (drain->rx[i] != NULL) { apple_sio_dma_blit(drain->rx[i], 0, sizeof(buffer)); }
+    }
+
+    timer_mod_ns(drain->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + AUDIO_DRAIN_INTERVAL_NS);
+}
+
+static void t8030_create_audio_drain(AppleT8030MachineState* t8030)
+{
+    AppleSIO*            sio;
+    T8030AudioDrain*     drain;
+    AppleSIODMAEndpoint* skip_tx;
+    AppleSIODMAEndpoint* skip_rx;
+    size_t               i;
+
+    sio     = APPLE_SIO(object_property_get_link(OBJECT(t8030), "sio", &error_fatal));
+    skip_tx = apple_sio_get_endpoint(sio, AUDIO_DRAIN_SKIP_TX);
+    skip_rx = apple_sio_get_endpoint(sio, AUDIO_DRAIN_SKIP_RX);
+    drain   = g_new0(T8030AudioDrain, 1);
+
+    for (i = 0; i < ARRAY_SIZE(AUDIO_I2S_NODES) && drain->count < AUDIO_DRAIN_MAX_PORTS; i++) {
+        AppleDTNode*         node;
+        AppleDTProp*         prop;
+        AppleSIODMAEndpoint* tx;
+        AppleSIODMAEndpoint* rx;
+        uint8_t              channel;
+
+        node = apple_dt_get_node(t8030->device_tree, AUDIO_I2S_NODES[i]);
+        if (node == NULL) { continue; }
+
+        // The channel the node names, and the next one for the other direction,
+        // as t8030_create_mca() does for the speaker.
+        prop = apple_dt_get_prop(node, "dma-channels");
+        if (prop == NULL || prop->len == 0) { continue; }
+
+        channel = ((const uint8_t*)prop->data)[0];
+        tx      = apple_sio_get_endpoint(sio, channel);
+        rx      = apple_sio_get_endpoint(sio, channel + 1);
+
+        if (tx == skip_tx || tx == skip_rx) { tx = NULL; }
+        if (rx == skip_tx || rx == skip_rx) { rx = NULL; }
+        if (tx == NULL && rx == NULL) { continue; }
+
+        drain->tx[drain->count] = tx;
+        drain->rx[drain->count] = rx;
+        drain->count++;
+    }
+
+    if (drain->count == 0) {
+        g_free(drain);
+        return;
+    }
+
+    drain->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, t8030_audio_drain, drain);
+    timer_mod_ns(drain->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + AUDIO_DRAIN_INTERVAL_NS);
 }
 
 static void t8030_create_speaker_top(AppleT8030MachineState* t8030)
@@ -3350,6 +3450,7 @@ static void t8030_create_devices(AppleT8030MachineState* t8030)
         t8030_create_mca(t8030);
         t8030_create_speaker_top(t8030);
         t8030_create_speaker_bottom(t8030);
+        t8030_create_audio_drain(t8030);
     }
     else if (t8030->audiodev != NULL) {
         error_setg(&error_fatal, "audiodev= needs audio=on");
