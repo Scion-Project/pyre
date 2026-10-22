@@ -79,6 +79,7 @@
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
+#include "hw/gpu/apple-agx.h"
 #include "arm-powerctl.h"
 
 #define PROP_VISIT_GETTER_SETTER(_type, _name)                                                           \
@@ -1079,6 +1080,7 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
     apple_boot_allocate_segment_records(memory_map, hdr);
     if (t8030->sptm != NULL) { apple_sptm_allocate_memory_map(memory_map, &t8030->sptm_layout); }
 
+    info->keep_gpu = t8030->gpu;
     apple_boot_populate_dt(t8030->device_tree, info, auto_boot);
 
     switch (hdr->file_type) {
@@ -2674,6 +2676,49 @@ static void t8030_create_aop(AppleT8030MachineState* t8030)
     sysbus_realize_and_unref(aop, &error_fatal);
 }
 
+// `-M t8030,gpu=on`: the AGX GPU with its coprocessor's firmware emulated
+// (hw/gpu/apple-agx, docs/GPU-EMULATION-SCOPE.md milestone M0).
+static void t8030_create_gpu(AppleT8030MachineState* t8030)
+{
+    AppleDTNode*  armio;
+    AppleDTNode*  sgx;
+    AppleDTNode*  gfx_asc;
+    AppleDTProp*  prop;
+    uint64_t*     reg;
+    uint32_t*     ints;
+    SysBusDevice* agx;
+    uint32_t      i;
+
+    armio = apple_dt_get_node(t8030->device_tree, "arm-io");
+    assert_nonnull(armio);
+    sgx = apple_dt_get_node(armio, "sgx");
+    assert_nonnull(sgx);
+    gfx_asc = apple_dt_get_node(armio, "gfx-asc");
+    assert_nonnull(gfx_asc);
+
+    agx = apple_agx_create(sgx, gfx_asc);
+    object_property_add_child(OBJECT(t8030), "gpu", OBJECT(agx));
+
+    prop = apple_dt_get_prop(gfx_asc, "reg");
+    reg  = (uint64_t*)prop->data;
+    sysbus_mmio_map(agx, 0, t8030->armio_base + reg[0]);
+    sysbus_mmio_map(agx, 1, t8030->armio_base + reg[2]);
+
+    prop = apple_dt_get_prop(sgx, "reg");
+    reg  = (uint64_t*)prop->data;
+    sysbus_mmio_map(agx, 2, t8030->armio_base + reg[0]);
+    sysbus_mmio_map(agx, 3, t8030->armio_base + reg[2]);
+
+    prop = apple_dt_get_prop(gfx_asc, "interrupts");
+    assert_nonnull(prop);
+    ints = (uint32_t*)prop->data;
+    for (i = 0; i < prop->len / sizeof(uint32_t); ++i) {
+        sysbus_connect_irq(agx, i, qdev_get_gpio_in(DEVICE(t8030->aic), ints[i]));
+    }
+
+    sysbus_realize_and_unref(agx, &error_fatal);
+}
+
 static void t8030_create_mca(AppleT8030MachineState* t8030)
 {
     AppleDTNode* child;
@@ -3190,6 +3235,7 @@ static void t8030_init(MachineState* machine)
     t8030_create_display(t8030);
     t8030_create_mt_spi(t8030);
     t8030_create_aop(t8030);
+    if (t8030->gpu) { t8030_create_gpu(t8030); }
     t8030_create_mca(t8030);
     t8030_create_speaker_top(t8030);
     t8030_create_speaker_bottom(t8030);
@@ -3277,6 +3323,7 @@ PROP_VISIT_GETTER_SETTER(uint32, disp_width);
 PROP_VISIT_GETTER_SETTER(uint32, disp_height);
 PROP_GETTER_SETTER(bool, enable_pac);
 PROP_GETTER_SETTER(bool, patch_check);
+PROP_GETTER_SETTER(bool, gpu);
 
 static void t8030_class_init(ObjectClass* klass, const void* data)
 {
@@ -3352,6 +3399,10 @@ static void t8030_class_init(ObjectClass* klass, const void* data)
     object_class_property_add_bool(klass, "enable-pac", t8030_get_enable_pac, t8030_set_enable_pac);
     object_class_property_set_description(klass, "enable-pac",
                                           "Enable PAC with virtualisation (supports arm64e binaries only).");
+    object_class_property_add_bool(klass, "gpu", t8030_get_gpu, t8030_set_gpu);
+    object_class_property_set_description(klass, "gpu",
+                                          "Expose the AGX GPU and emulate its coprocessor's firmware "
+                                          "(experimental, docs/GPU-EMULATION-SCOPE.md). Default off.");
 }
 
 static const TypeInfo t8030_info = {

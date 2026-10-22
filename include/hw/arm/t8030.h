@@ -90,4 +90,5 @@ typedef struct
     uint32_t        disp_height;
     bool            enable_pac;
     bool            patch_check;
+    bool            gpu;
 } AppleT8030MachineState;

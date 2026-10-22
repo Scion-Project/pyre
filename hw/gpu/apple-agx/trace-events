@@ -1,0 +1,9 @@
+# See docs/devel/tracing.rst for syntax documentation.
+
+# agx.c
+apple_agx_sgx_read(uint64_t off, uint64_t val, unsigned size) "sgx +0x%" PRIx64 " -> 0x%" PRIx64 " (%u, first read)"
+apple_agx_sgx_write(uint64_t off, uint64_t val, unsigned size) "sgx +0x%" PRIx64 " <- 0x%" PRIx64 " (%u)"
+apple_agx_asc_wrap_read(uint64_t off, unsigned size) "asc-wrap +0x%" PRIx64 " (%u)"
+apple_agx_asc_wrap_write(uint64_t off, uint64_t val, unsigned size) "asc-wrap +0x%" PRIx64 " <- 0x%" PRIx64 " (%u)"
+apple_agx_ep_msg(unsigned ep, uint64_t msg) "ep 0x%x msg 0x%016" PRIx64
+apple_agx_boot_done(void) "RTKit management handshake done"
