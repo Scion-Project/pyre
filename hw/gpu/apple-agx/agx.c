@@ -17,6 +17,7 @@
 #include "qapi/error.h"
 #include "qemu/bitmap.h"
 #include "qemu/log.h"
+#include "hw/qdev-properties.h"
 #include "system/address-spaces.h"
 #include "agx-uat.h"
 #include "trace.h"
@@ -35,8 +36,19 @@ OBJECT_DECLARE_TYPE(AppleAGXState, AppleAGXStateClass, APPLE_AGX)
 #define AGX_MSG_HALT          (0x85)
 #define AGX_MSG_RX_DOORBELL   (0x42ULL << 48)
 
-/* sgx reg[1] ID block (G13 offsets relative to the 16 MiB SGX window). */
-#define SGX_WINDOW_ID_BASE (0xD00000)
+/*
+ * GPU identification registers (offsets in the 16 MiB SGX window, as in
+ * drm/asahi regs.rs). The accelerator's probe() reads all six and fails
+ * unless they describe a GPU its kext supports.
+ */
+#define SGX_ID_VERSION  (0xD04000) /* [31:24] gen, [23:16] variant, [15:8] rev */
+#define SGX_ID_UNK08    (0xD04008)
+#define SGX_ID_COUNTS_1 (0xD04010) /* [7:0] cores per cluster */
+#define SGX_ID_COUNTS_2 (0xD04014) /* [23:16] GPs */
+#define SGX_ID_UNK18    (0xD04018)
+#define SGX_ID_CLUSTERS (0xD0401C) /* [19:12] clusters */
+#define SGX_CORE_MASK_0 (0xD01500)
+#define SGX_CORE_MASK_1 (0xD01514)
 
 enum
 {
@@ -70,6 +82,17 @@ struct AppleAGXState
 
     MemoryRegion    asc_wrap;
     AppleAGXRegBank sgx[2];
+
+    /* Reset values of the ID registers (qdev properties, so they can be
+     * overridden with -global apple-agx.<name>=<value>). */
+    uint32_t id_version;
+    uint32_t id_unk08;
+    uint32_t id_counts_1;
+    uint32_t id_counts_2;
+    uint32_t id_unk18;
+    uint32_t id_clusters;
+    uint32_t core_mask_0;
+    uint32_t core_mask_1;
 
     uint64_t initdata_va;
     bool     fw_inited;
@@ -213,6 +236,19 @@ SysBusDevice* apple_agx_create(AppleDTNode* sgx, AppleDTNode* gfx_asc)
     return SYS_BUS_DEVICE(dev);
 }
 
+/* Store a reset value into whichever bank covers SGX window offset `off`. */
+static void agx_sgx_preset(AppleAGXState* s, hwaddr off, uint32_t val)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(s->sgx); i++) {
+        AppleAGXRegBank* b = &s->sgx[i];
+        if (off >= b->window_off && off + 4 <= b->window_off + b->size) {
+            memcpy(b->regs + (off - b->window_off), &val, 4);
+            return;
+        }
+    }
+    g_assert_not_reached();
+}
+
 static void apple_agx_reset_hold(Object* obj, ResetType type)
 {
     AppleAGXState* s  = APPLE_AGX(obj);
@@ -220,9 +256,37 @@ static void apple_agx_reset_hold(Object* obj, ResetType type)
 
     if (ac->parent_phases.hold != NULL) { ac->parent_phases.hold(obj, type); }
 
+    for (size_t i = 0; i < ARRAY_SIZE(s->sgx); i++) {
+        memset(s->sgx[i].regs, 0, s->sgx[i].size);
+        bitmap_zero(s->sgx[i].touched, s->sgx[i].size >> 2);
+    }
+    agx_sgx_preset(s, SGX_ID_VERSION, s->id_version);
+    agx_sgx_preset(s, SGX_ID_UNK08, s->id_unk08);
+    agx_sgx_preset(s, SGX_ID_COUNTS_1, s->id_counts_1);
+    agx_sgx_preset(s, SGX_ID_COUNTS_2, s->id_counts_2);
+    agx_sgx_preset(s, SGX_ID_UNK18, s->id_unk18);
+    agx_sgx_preset(s, SGX_ID_CLUSTERS, s->id_clusters);
+    agx_sgx_preset(s, SGX_CORE_MASK_0, s->core_mask_0);
+    agx_sgx_preset(s, SGX_CORE_MASK_1, s->core_mask_1);
+
     s->initdata_va = 0;
     s->fw_inited   = false;
 }
+
+/*
+ * A13: one cluster of four cores, generation 3 ("G12"), variant 1 ("P"),
+ * revision 0x10 (B0, the AGXAcceleratorG12P_B0 personality).
+ */
+static const Property apple_agx_properties[] = {
+    DEFINE_PROP_UINT32("id-version", AppleAGXState, id_version, 0x03011000),
+    DEFINE_PROP_UINT32("id-unk08", AppleAGXState, id_unk08, 0),
+    DEFINE_PROP_UINT32("id-counts-1", AppleAGXState, id_counts_1, 0x00010104),
+    DEFINE_PROP_UINT32("id-counts-2", AppleAGXState, id_counts_2, 0x00010000),
+    DEFINE_PROP_UINT32("id-unk18", AppleAGXState, id_unk18, 0),
+    DEFINE_PROP_UINT32("id-clusters", AppleAGXState, id_clusters, 0x00001000),
+    DEFINE_PROP_UINT32("core-mask-0", AppleAGXState, core_mask_0, 0xF),
+    DEFINE_PROP_UINT32("core-mask-1", AppleAGXState, core_mask_1, 0),
+};
 
 static void apple_agx_init(Object* obj) { }
 
@@ -236,5 +300,6 @@ static void apple_agx_class_init(ObjectClass* klass, const void* data)
 
     resettable_class_set_parent_phases(rc, NULL, apple_agx_reset_hold, NULL, &ac->parent_phases);
     dc->desc = "Apple AGX GPU (firmware HLE)";
+    device_class_set_props(dc, apple_agx_properties);
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
