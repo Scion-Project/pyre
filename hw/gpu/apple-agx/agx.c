@@ -37,11 +37,16 @@ OBJECT_DECLARE_TYPE(AppleAGXState, AppleAGXStateClass, APPLE_AGX)
 #define AGX_MSG_RX_DOORBELL   (0x42ULL << 48)
 
 /*
- * GPU identification registers (offsets in the 16 MiB SGX window, as in
- * drm/asahi regs.rs). The accelerator's probe() reads all six and fails
- * unless they describe a GPU its kext supports.
+ * GPU identification registers (offsets in the 16 MiB SGX window; the same
+ * addresses as G13's in drm/asahi regs.rs, but the G12 kext decodes them
+ * differently). The accelerator's probe() reads all six:
+ *   ID_VERSION [31:16] must be 0x0300 (G12); [15:12] major revision
+ *     (0 = A, 1 = B), [11:8] minor: A0 and B0 are the two personalities.
+ *   ID_COUNTS_1 [7:0], [15:8], [23:16]; ID_COUNTS_2 [7:0], [15:8], [23:16];
+ *   ID_CLUSTERS [19:12] and four 4-bit fields multiplied with ID_UNK18's
+ *   [19:16], [23:20], [27:24] into per-cluster unit counts.
  */
-#define SGX_ID_VERSION  (0xD04000) /* [31:24] gen, [23:16] variant, [15:8] rev */
+#define SGX_ID_VERSION  (0xD04000)
 #define SGX_ID_UNK08    (0xD04008)
 #define SGX_ID_COUNTS_1 (0xD04010) /* [7:0] cores per cluster */
 #define SGX_ID_COUNTS_2 (0xD04014) /* [23:16] GPs */
@@ -274,11 +279,11 @@ static void apple_agx_reset_hold(Object* obj, ResetType type)
 }
 
 /*
- * A13: one cluster of four cores, generation 3 ("G12"), variant 1 ("P"),
- * revision 0x10 (B0, the AGXAcceleratorG12P_B0 personality).
+ * A13 ("G12P"), revision B0 (the AGXAcceleratorG12P_B0 personality, whose
+ * Metal plugin is AGXMetalA13): one cluster of four cores.
  */
 static const Property apple_agx_properties[] = {
-    DEFINE_PROP_UINT32("id-version", AppleAGXState, id_version, 0x03011000),
+    DEFINE_PROP_UINT32("id-version", AppleAGXState, id_version, 0x03001000),
     DEFINE_PROP_UINT32("id-unk08", AppleAGXState, id_unk08, 0),
     DEFINE_PROP_UINT32("id-counts-1", AppleAGXState, id_counts_1, 0x00010104),
     DEFINE_PROP_UINT32("id-counts-2", AppleAGXState, id_counts_2, 0x00010000),
