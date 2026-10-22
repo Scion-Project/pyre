@@ -862,6 +862,36 @@ static void t8030_rtkit_mem_setup(AppleT8030MachineState* t8030, CarveoutAllocat
     t8030_rtkit_seg_prop_setup(iop_nub, carveout_alloc_mem(ca, size), size);
 }
 
+/*
+ * The GPU MMU (UAT) regions iBoot carves out for the GPU (`gpu=on` only).
+ * The kernel's IOUnifiedAddressTranslator maps one 16 KiB page of each:
+ * the kernel-half (TTBR1) L1 table shared with the GPU firmware, the TTBAT
+ * (the per-context TTBR table the firmware walks; its property is a page
+ * number), and the AP/firmware page-table handoff area.
+ */
+static void t8030_gpu_mem_setup(AppleT8030MachineState* t8030, CarveoutAllocator* ca)
+{
+    AppleDTNode* sgx;
+    hwaddr       shared, ttbat, handoff;
+
+    sgx = apple_dt_get_node(t8030->device_tree, "arm-io/sgx");
+    assert_nonnull(sgx);
+
+    shared  = carveout_alloc_mem(ca, AGX_UAT_REGION_SIZE);
+    ttbat   = carveout_alloc_mem(ca, AGX_UAT_REGION_SIZE);
+    handoff = carveout_alloc_mem(ca, AGX_UAT_REGION_SIZE);
+    address_space_set(&address_space_memory, shared, 0, AGX_UAT_REGION_SIZE, MEMTXATTRS_UNSPECIFIED);
+    address_space_set(&address_space_memory, ttbat, 0, AGX_UAT_REGION_SIZE, MEMTXATTRS_UNSPECIFIED);
+    address_space_set(&address_space_memory, handoff, 0, AGX_UAT_REGION_SIZE, MEMTXATTRS_UNSPECIFIED);
+
+    apple_dt_set_prop_u64(sgx, "gfx-shared-region-base", shared);
+    apple_dt_set_prop_u32(sgx, "ttbat-phys-addr-base", ttbat / AGX_UAT_REGION_SIZE);
+    apple_dt_set_prop_u64(sgx, "gfx-handoff-base", handoff);
+
+    apple_agx_set_uat_regions(SYS_BUS_DEVICE(object_property_get_link(OBJECT(t8030), "agx", &error_fatal)), shared,
+                              ttbat, handoff);
+}
+
 static void t8030_memory_setup(AppleT8030MachineState* t8030)
 {
     AppleDTNode*       carveout_memory_map;
@@ -900,6 +930,7 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
 
     t8030_rtkit_mem_setup(t8030, ca, "sio", "iop-sio-nub", SIO_SIZE);
     t8030_rtkit_mem_setup(t8030, ca, "ans", "iop-ans-nub", ANS_SIZE);
+    if (t8030->gpu) { t8030_gpu_mem_setup(t8030, ca); }
 
     if (t8030->sep_rom_filename) {
         if (!g_file_get_contents(t8030->sep_rom_filename, &seprom, &fsize, NULL)) {

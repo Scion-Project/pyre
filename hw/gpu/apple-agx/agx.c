@@ -99,6 +99,10 @@ struct AppleAGXState
     uint32_t core_mask_0;
     uint32_t core_mask_1;
 
+    hwaddr uat_shared;  /* kernel-half (TTBR1) L1 table */
+    hwaddr uat_ttbat;   /* context TTBR table */
+    hwaddr uat_handoff; /* AP/firmware page-table handoff */
+
     uint64_t initdata_va;
     bool     fw_inited;
 };
@@ -203,6 +207,16 @@ static void agx_init_bank(AppleAGXState* s, int i, uint64_t window_off, uint64_t
     snprintf(name, sizeof(name), TYPE_APPLE_AGX ".sgx%d", i);
     memory_region_init_io(&b->mr, OBJECT(s), &agx_sgx_ops, b, name, size);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &b->mr);
+}
+
+void apple_agx_set_uat_regions(SysBusDevice* agx, hwaddr shared, hwaddr ttbat, hwaddr handoff)
+{
+    AppleAGXState* s = APPLE_AGX(agx);
+
+    s->uat_shared  = shared;
+    s->uat_ttbat   = ttbat;
+    s->uat_handoff = handoff;
+    trace_apple_agx_uat_regions(shared, ttbat, handoff);
 }
 
 SysBusDevice* apple_agx_create(AppleDTNode* sgx, AppleDTNode* gfx_asc)

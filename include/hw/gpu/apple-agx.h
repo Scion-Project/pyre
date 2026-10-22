@@ -19,3 +19,12 @@
  * (ASC wrapper), sgx reg[0], sgx reg[1]. IRQs: the gfx-asc mailbox lines.
  */
 SysBusDevice* apple_agx_create(AppleDTNode* sgx, AppleDTNode* gfx_asc);
+
+/* Each UAT region the boot loader carves out is one 16 KiB page. */
+#define AGX_UAT_REGION_SIZE (16 * KiB)
+
+/*
+ * Tell the GPU where the boot loader put the UAT regions: the kernel-half
+ * L1 table, the TTBAT (context TTBR table) and the handoff area.
+ */
+void apple_agx_set_uat_regions(SysBusDevice* agx, hwaddr shared, hwaddr ttbat, hwaddr handoff);
