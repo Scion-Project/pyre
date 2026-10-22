@@ -247,6 +247,11 @@ static const char* REM_PROPS[] = {
  */
 static const char* GPU_KEEP_COMP[] = {
     "gpu,t8030\0$",
+    /* mapper-gfx-asc, gfx-asc's `iommu-parent` (AGXArmFirmwareMapper): the
+     * generic "iommu-mapper" entry in KEEP_COMP does not match it, and
+     * without it the gfx-asc IOP never starts and the accelerator times
+     * out waiting for its firmware. */
+    "iommu-mapper,gfx\0$",
 };
 
 static const char* GPU_KEEP_NAMES[] = {
