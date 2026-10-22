@@ -636,10 +636,28 @@ static void apple_mt_spi_handle_fw_packet(AppleMTSPIState* s)
 
     packet_type = apple_mt_spi_buf_read_byte(&s->rx, sizeof(uint32_t));
 
+    if (packet_type != LL_PACKET_NO_DATA) {
+        const uint8_t* d = s->rx.data;
+        trace_apple_mt_spi_ll_rx(packet_type, d[5], lduw_le_p(d + 6), lduw_le_p(d + 8), lduw_le_p(d + 10));
+        trace_apple_mt_spi_ll_rx_hid(d[12], d[13], d[14], d[15], lduw_le_p(d + 16), lduw_le_p(d + 18),
+                                     ldq_be_p(d + 20), ldq_be_p(d + 28));
+    }
+
     switch (packet_type) {
         case LL_PACKET_NO_DATA: break;
         case LL_PACKET_CONTROL: apple_mt_spi_handle_control(s); break;
-        default               : warn_report("%s: Unknown LL packet type 0x%X", __func__, packet_type); break;
+        /*
+         * HID transfer packets on the data channel (iOS 14's driver sends
+         * type 0x10 a few times after boot). They carry a report for the
+         * controller to consume and get no packet back: the link-layer ACK
+         * goes out in the status exchange that follows (see
+         * apple_mt_spi_handle_fw()), so tracing them is all that is left.
+         */
+        case LL_PACKET_LOSSLESS_OUTPUT:
+        case LL_PACKET_LOSSY_OUTPUT:
+        case LL_PACKET_LOSSLESS_INPUT:
+        case LL_PACKET_LOSSY_INPUT    : break;
+        default                       : warn_report("%s: Unknown LL packet type 0x%X", __func__, packet_type); break;
     }
 }
 
