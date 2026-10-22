@@ -47,6 +47,11 @@ typedef enum SitKind
     SIT_ST,
     SIT_LDP,
     SIT_STP,
+    /* Loads and stores of SIMD&FP registers (rt, rt2: V0-V31; size 0-4: B, H, S, D, Q). */
+    SIT_LDV,
+    SIT_STV,
+    SIT_LDPV,
+    SIT_STPV,
     /* Conditional branches to label: B.cond (cond), CBZ/CBNZ, TBZ/TBNZ. These end the region. */
     SIT_BCOND,
     SIT_CBZ,
@@ -62,6 +67,7 @@ typedef enum SitAddrMode
     SIT_AM_PRE,  /* [rn, #imm]! */
     SIT_AM_POST, /* [rn], #imm */
     SIT_AM_REG,  /* [rn, rm, <ext> #shift] */
+    SIT_AM_PC,   /* literal: guest pc + imm (pcrel), or imm */
 } SitAddrMode;
 
 /* SitInsn.ext for loads: what happens to the loaded value. */
@@ -110,6 +116,8 @@ typedef struct SitLayout
     int vf;    /* uint32_t: V is bit 31 */
     int nf;    /* uint32_t: N is bit 31 */
     int zf;    /* uint32_t: Z is set if zero */
+    int vregs;   /* SIMD&FP register V0; low 128 bits little-endian */
+    int vstride; /* bytes between V<n> and V<n+1> */
 } SitLayout;
 
 #endif

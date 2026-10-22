@@ -25,6 +25,9 @@ import random
 import sys
 
 POOL = list(range(0, 18)) + [19, 20, 21]
+# SIMD&FP registers the program may use: V8-V15 are callee-saved on the host (the harness).
+VPOOL = list(range(0, 8)) + list(range(16, 32))
+VSZ = {0: "b", 1: "h", 2: "s", 3: "d", 4: "q"}
 CONDS = ["eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al"]
 # buffer windows: base register, window start (offset in the 64 KiB buffer), initial offset in the window.
 # x27 sits 64 bytes below a 16 KiB page boundary, so its accesses cross pages (the TLB slow path).
@@ -173,9 +176,86 @@ class Gen:
         start = BASES[b][0]
         return start, start + WINDOW
 
+    def vldst(self, wb=True):
+        """SIMD&FP loads and stores (and literal loads), like ldst()."""
+        r = self.r
+        b = r.choice(list(BASES))
+        cur = self.off[b]
+        k = r.randrange(8)
+        v = lambda: r.choice(VPOOL)  # noqa: E731
+        if k <= 2:
+            size = r.randrange(5)
+            op = r.choice(["ldr", "str"])
+            mode = r.choice(["uoff", "unscaled", "pre", "post"] if wb else ["uoff", "unscaled"])
+            reg = f"{VSZ[size]}{v()}"
+            if mode == "uoff":
+                off = r.randrange(0, 128) << size
+                if cur + off + (1 << size) > WINDOW:
+                    off = 0
+                self.emit(f"{op} {reg}, [x{b}, #{off}]")
+            elif mode == "unscaled":
+                off = r.randrange(-256, 256)
+                if not (0 <= cur + off and cur + off + 16 <= WINDOW):
+                    off = 0
+                self.emit(f"{op.replace('ldr', 'ldur').replace('str', 'stur')} {reg}, [x{b}, #{off}]")
+            else:
+                imm = r.randrange(-256, 256)
+                lo, hi = 64, WINDOW - 64
+                if not (lo <= cur + imm <= hi):
+                    imm = -imm if lo <= cur - imm <= hi and -imm != 256 else 0
+                self.emit(f"{op} {reg}, [x{b}, #{imm}]!" if mode == "pre" else f"{op} {reg}, [x{b}], #{imm}")
+                self.off[b] = cur + imm
+        elif k <= 3:
+            size = r.randrange(5)
+            op = r.choice(["ldr", "str"])
+            self.emit(f"and x25, {self.x()}, #0xf8")
+            ext = r.choice(["lsl", "uxtw", "sxtw"])
+            idx = "x25" if ext == "lsl" else "w25"
+            sh = r.choice([0, size]) if size else 0
+            if ext == "lsl" and not sh:
+                self.emit(f"{op} {VSZ[size]}{v()}, [x{b}, {idx}]")
+            else:
+                self.emit(f"{op} {VSZ[size]}{v()}, [x{b}, {idx}, {ext} #{sh}]")
+        elif k <= 5:
+            size = r.randrange(2, 5)
+            op = r.choice(["ldp", "stp"])
+            a_, c_ = v(), v()
+            while op == "ldp" and c_ == a_:
+                c_ = v()
+            scale = 1 << size
+            mode = r.choice(["off", "pre", "post"] if wb else ["off"])
+            imm = r.randrange(-64, 64) * scale
+            lo, hi = 128, WINDOW - 128
+            if not (lo <= cur + imm <= hi):
+                imm = -imm if lo <= cur - imm <= hi and -imm != 64 * scale else 0
+            regs = f"{VSZ[size]}{a_}, {VSZ[size]}{c_}"
+            if mode == "off":
+                self.emit(f"{op} {regs}, [x{b}, #{imm}]")
+            elif mode == "pre":
+                self.emit(f"{op} {regs}, [x{b}, #{imm}]!")
+                self.off[b] = cur + imm
+            else:
+                self.emit(f"{op} {regs}, [x{b}], #{imm}")
+                self.off[b] = cur + imm
+        else:
+            # literal loads from a pool jumped over
+            self.label += 1
+            n = self.label
+            if r.random() < 0.5:
+                self.emit(f"ldr {VSZ[r.randrange(2, 5)]}{v()}, 8{n}f")
+            else:
+                op, dst = r.choice([("ldr", self.x()), ("ldr", self.w()), ("ldrsw", self.x())])
+                self.emit(f"{op} {dst}, 8{n}f")
+            self.emit(f"b 9{n}f")
+            self.out.append(f"8{n}:")
+            self.emit(f".quad {r.getrandbits(64):#x}, {r.getrandbits(64):#x}")
+            self.out.append(f"9{n}:")
+
     def ldst(self, wb=True):
         """wb=False: no pre/post-index forms (inside a branch shadow the tracked base offsets must not move)."""
         r = self.r
+        if r.random() < 0.3:
+            return self.vldst(wb)
         b = r.choice(list(BASES))
         cur = self.off[b]
         k = r.randrange(10)
@@ -286,16 +366,20 @@ class Gen:
     def branch(self):
         r = self.r
         self.label += 1
+        n = self.label
         k = r.randrange(3)
         if k == 0:
-            self.emit(f"b.{r.choice(CONDS[:-1])} 9{self.label}f")
+            self.emit(f"b.{r.choice(CONDS[:-1])} 9{n}f")
         elif k == 1:
-            self.emit(f"{r.choice(['cbz', 'cbnz'])} {self.rr(r.random() < 0.5)}, 9{self.label}f")
+            self.emit(f"{r.choice(['cbz', 'cbnz'])} {self.rr(r.random() < 0.5)}, 9{n}f")
         else:
-            self.emit(f"{r.choice(['tbz', 'tbnz'])} {self.x()}, #{r.randrange(64)}, 9{self.label}f")
+            self.emit(f"{r.choice(['tbz', 'tbnz'])} {self.x()}, #{r.randrange(64)}, 9{n}f")
         for _ in range(r.randint(0, 3)):
-            self.alu() if r.random() < 0.7 else self.ldst(wb=False)
-        self.out.append(f"9{self.label}:")
+            if r.random() < 0.7:
+                self.alu()
+            else:
+                self.ldst(wb=False)
+        self.out.append(f"9{n}:")
 
     def fold(self):
         for n in self.r.sample(POOL, 6):
@@ -311,6 +395,9 @@ class Gen:
             self.emit(f"add x{b}, x0, x25")
         for n_ in POOL:
             self.movimm(n_, self.imm64())
+        for n_ in VPOOL:
+            self.emit(f"fmov d{n_}, x{self.reg()}")
+            self.emit(f"mov v{n_}.d[1], x{self.reg()}")
         self.emit("msr nzcv, x1")
         i = 0
         while i < n:
@@ -332,6 +419,11 @@ class Gen:
             self.emit("ror x23, x23, #7")
         self.emit("mrs x22, nzcv")
         self.emit("eor x23, x23, x22")
+        for n_ in VPOOL:
+            self.emit(f"fmov x22, d{n_}")
+            self.emit("eor x23, x23, x22")
+            self.emit(f"mov x22, v{n_}.d[1]")
+            self.emit("eor x23, x23, x22, ror #17")
         # buffer base back from x26's final offset, for nic_hash_buffer
         self.movimm(25, BASES[26][0] + self.off[26])
         self.emit("sub x0, x26, x25")
