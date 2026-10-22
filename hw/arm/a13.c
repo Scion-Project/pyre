@@ -509,6 +509,7 @@ static void apple_a13_add_cpregs(AppleA13State* acpu)
     ARMCPU* cpu = &acpu->parent_obj;
     define_arm_cp_regs(cpu, apple_a13_cp_reginfo_tcg);
     apple_a13_init_gxf(acpu);
+    if (APPLE_A13_GET_CLASS(acpu)->a14) { apple_a14_init_cpregs(acpu); }
 }
 
 static void apple_a13_realize(DeviceState* dev, Error** errp)
@@ -523,7 +524,14 @@ static void apple_a13_realize(DeviceState* dev, Error** errp)
     apple_a13_add_cpregs(acpu);
     tclass->parent_realize(dev, errp);
     if (*errp) { return; }
-    apple_a13_init_gxf_override(acpu);
+    /*
+     * A13: in GL1 the EL1 names reach the GL1 bank. The A14 has its own GL1
+     * registers instead (apple_a14_init_gxf()) and no such redirection.
+     */
+    if (tclass->a14) { apple_a14_init_late_cpregs(acpu); }
+    else {
+        apple_a13_init_gxf_override(acpu);
+    }
     fiq_or = qdev_new(TYPE_OR_IRQ);
     object_property_add_child(obj, "fiq-or", OBJECT(fiq_or));
     qdev_prop_set_uint16(fiq_or, "num-lines", 16);
@@ -539,14 +547,20 @@ static void apple_a13_instance_init(Object* obj) { object_property_set_uint(obj,
 
 AppleA13State* apple_a13_create(const char* name, uint32_t cpu_id, uint32_t phys_id, uint32_t cluster_id,
                                 uint16_t cluster_type)
+{ return apple_a13_create_type(TYPE_APPLE_A13, name, cpu_id, phys_id, cluster_id, cluster_type); }
+
+AppleA13State* apple_a13_create_type(const char* type, const char* name, uint32_t cpu_id, uint32_t phys_id,
+                                     uint32_t cluster_id, uint16_t cluster_type)
 {
     DeviceState*   dev;
     AppleA13State* acpu;
+    AppleA13Class* ac;
     ARMCPU*        cpu;
     Object*        obj;
     uint64_t       mpidr;
 
-    obj  = object_new(TYPE_APPLE_A13);
+    obj  = object_new(type);
+    ac   = APPLE_A13_GET_CLASS(obj);
     dev  = DEVICE(obj);
     acpu = APPLE_A13(dev);
     cpu  = &acpu->parent_obj;
@@ -565,12 +579,12 @@ AppleA13State* apple_a13_create(const char* name, uint32_t cpu_id, uint32_t phys
     cpu->midr = REG_FIELD_DP64(cpu->midr, MIDR_EL1, REVISION, 0x1);
 
     switch (cluster_type) {
-        case 'P':    // Lightning
+        case 'P':    // Lightning, Firestorm
             mpidr     |= (1 << ARM_AFF2_SHIFT);
-            cpu->midr  = REG_FIELD_DP64(cpu->midr, MIDR_EL1, PARTNUM, 0x12);
+            cpu->midr  = REG_FIELD_DP64(cpu->midr, MIDR_EL1, PARTNUM, ac->part_p);
             break;
-        case 'E':    // Thunder
-            cpu->midr = REG_FIELD_DP64(cpu->midr, MIDR_EL1, PARTNUM, 0x13);
+        case 'E':    // Thunder, Icestorm
+            cpu->midr = REG_FIELD_DP64(cpu->midr, MIDR_EL1, PARTNUM, ac->part_e);
             break;
         case 'S':    // SEP
             mpidr     |= (0xb << ARM_AFF1_SHIFT);
@@ -593,12 +607,14 @@ AppleA13State* apple_a13_create(const char* name, uint32_t cpu_id, uint32_t phys
     return acpu;
 }
 
-AppleA13State* apple_a13_from_node(AppleDTNode* node)
+AppleA13State* apple_a13_from_node(AppleDTNode* node) { return apple_a13_from_node_type(node, TYPE_APPLE_A13); }
+
+AppleA13State* apple_a13_from_node_type(AppleDTNode* node, const char* type)
 {
     AppleA13State* acpu;
 
-    acpu = apple_a13_create(
-        apple_dt_get_prop_str(node, "name", &error_fatal), apple_dt_get_prop_u32(node, "cpu-id", &error_fatal),
+    acpu = apple_a13_create_type(
+        type, apple_dt_get_prop_str(node, "name", &error_fatal), apple_dt_get_prop_u32(node, "cpu-id", &error_fatal),
         apple_dt_get_prop_u32(node, "reg", &error_fatal), apple_dt_get_prop_u32(node, "cluster-id", &error_fatal),
         apple_dt_get_prop_u16(node, "cluster-type", &error_fatal));
 
@@ -628,6 +644,19 @@ static void apple_a13_class_init(ObjectClass* klass, const void* data)
     device_class_set_parent_realize(dc, apple_a13_realize, &tc->parent_realize);
     dc->desc = "Apple A13 CPU";
     set_bit(DEVICE_CATEGORY_CPU, dc->categories);
+    tc->part_p = 0x12;    // Lightning
+    tc->part_e = 0x13;    // Thunder
+}
+
+static void apple_a14_class_init(ObjectClass* klass, const void* data)
+{
+    DeviceClass*   dc = DEVICE_CLASS(klass);
+    AppleA13Class* tc = APPLE_A13_CLASS(klass);
+
+    dc->desc   = "Apple A14 CPU";
+    tc->part_p = 0x21;    // Firestorm (XNU CPU_PART_FIRESTORM)
+    tc->part_e = 0x20;    // Icestorm (XNU CPU_PART_ICESTORM)
+    tc->a14    = true;
 }
 
 static void apple_a13_cluster_reset_enter(Object* obj, ResetType type)
@@ -657,6 +686,11 @@ static const TypeInfo apple_a13_types[] = {
         .instance_init = apple_a13_instance_init,
         .class_size    = sizeof(AppleA13Class),
         .class_init    = apple_a13_class_init,
+    },
+    {
+        .name       = TYPE_APPLE_A14,
+        .parent     = TYPE_APPLE_A13,
+        .class_init = apple_a14_class_init,
     },
     {
         .name   = TYPE_APPLE_A13_CLUSTER,

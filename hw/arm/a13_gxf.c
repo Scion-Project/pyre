@@ -646,6 +646,104 @@ static void apple_a13_define_sptm_regs(ARMCPU* cpu)
     }
 }
 
+/*
+ * A14 (Firestorm/Icestorm) GXF/SPRR differences, as on the M1 (Sven Peter's
+ * SPRR/GXF notes, m1n1 cpu_regs.h names). Evidence: the iOS 14.8 iPhone13,x
+ * kernelcache runs the same code as the iPhone12,x one with these encodings
+ * (docs/T8101-SCOPE.md section 9):
+ *  - the GL1 exception state has its own registers, S3_6_C15_C10_<n>
+ *    (SP, TPIDR, VBAR, SPSR, ASPSR, ESR, ELR, FAR for n = 0..7). The PPL
+ *    writes SPSR_GL1/ELR_GL1 there before returning, so the EL1 names do
+ *    not reach the GL1 bank on this core (the A13 override table is not
+ *    installed for it, see apple_a13_realize());
+ *  - S3_6_C15_C8_3 (ASPSR) is written outside the guarded level too;
+ *  - the EL1 SPRR permission register (A13 S3_6_C15_C3_0, "EL1BR1") is
+ *    S3_6_C15_C1_6, and the EL0 permission mask (A13 S3_6_C15_C3_1) is
+ *    S3_6_C15_C3_0.
+ * Exception entry/return in and out of GL1 (GENTER/GEXIT, exceptions taken
+ * while guarded) already uses the gxf.*_gl[1] state these registers expose.
+ */
+#define A14_GL1_REG(nm, op2_, field_gl)                                                                 \
+    {                                                                                                  \
+        .name        = nm,                                                                             \
+        .cp          = CP_REG_ARM64_SYSREG_CP,                                                         \
+        .state       = ARM_CP_STATE_AA64,                                                              \
+        .type        = ARM_CP_SUPPRESS_TB_END,                                                         \
+        .opc0        = 3,                                                                              \
+        .opc1        = 6,                                                                              \
+        .crn         = 15,                                                                             \
+        .crm         = 10,                                                                             \
+        .opc2        = (op2_),                                                                         \
+        .access      = PL1_RW,                                                                         \
+        .accessfn    = access_gxf,                                                                     \
+        .resetvalue  = 0,                                                                              \
+        .fieldoffset = offsetof(CPUARMState, field_gl),                                                \
+    }
+
+static const ARMCPRegInfo apple_a14_gxf_cp_reginfo[] = {
+    A14_GL1_REG("SP_GL1", 0, gxf.sp_gl[1]),
+    A14_GL1_REG("TPIDR_GL1", 1, gxf.tpidr_gl[1]),
+    A14_GL1_REG("VBAR_GL1", 2, gxf.vbar_gl[1]),
+    A14_GL1_REG("SPSR_GL1", 3, gxf.spsr_gl[1]),
+    A14_GL1_REG("ASPSR_GL1", 4, gxf.aspsr_gl[1]),
+    A14_GL1_REG("ESR_GL1", 5, gxf.esr_gl[1]),
+    A14_GL1_REG("ELR_GL1", 6, gxf.elr_gl[1]),
+    A14_GL1_REG("FAR_GL1", 7, gxf.far_gl[1]),
+    {
+        .name            = "ASPSR_EL1",
+        .cp              = CP_REG_ARM64_SYSREG_CP,
+        .state           = ARM_CP_STATE_AA64,
+        .type            = ARM_CP_OVERRIDE | ARM_CP_SUPPRESS_TB_END,
+        .opc0            = 3,
+        .opc1            = 6,
+        .crn             = 15,
+        .crm             = 8,
+        .opc2            = 3,
+        .access          = PL1_RW,
+        .resetvalue      = 0,
+        .fieldoffset     = offsetof(CPUARMState, gxf.aspsr_el1),
+    },
+    {
+        .name        = "SPRR_PERM_EL1",
+        .cp          = CP_REG_ARM64_SYSREG_CP,
+        .state       = ARM_CP_STATE_AA64,
+        .type        = ARM_CP_OVERRIDE,
+        .opc0        = 3,
+        .opc1        = 6,
+        .crn         = 15,
+        .crm         = 1,
+        .opc2        = 6,
+        .access      = PL1_RW,
+        .writefn     = sprr_el1_write,
+        .raw_writefn = raw_write,
+        .resetvalue  = 0,
+        .fieldoffset = offsetof(CPUARMState, sprr.sprr_el_br_el1[1][1]),
+    },
+    {
+        .name        = "SPRR_UMPRR_EL1",
+        .cp          = CP_REG_ARM64_SYSREG_CP,
+        .state       = ARM_CP_STATE_AA64,
+        .type        = ARM_CP_OVERRIDE,
+        .opc0        = 3,
+        .opc1        = 6,
+        .crn         = 15,
+        .crm         = 3,
+        .opc2        = 0,
+        .access      = PL1_RW,
+        .resetvalue  = 0,
+        .fieldoffset = offsetof(CPUARMState, sprr.mprr_el_br_el1[0][0]),
+    },
+};
+
+#undef A14_GL1_REG
+
+void apple_a14_init_gxf(AppleA13State* cpu)
+{
+    if (arm_feature(&cpu->parent_obj.env, ARM_FEATURE_GXF)) {
+        define_arm_cp_regs(&cpu->parent_obj, apple_a14_gxf_cp_reginfo);
+    }
+}
+
 void apple_a13_init_gxf(AppleA13State* cpu)
 {
     if (arm_feature(&cpu->parent_obj.env, ARM_FEATURE_GXF)) {

@@ -48,8 +48,13 @@
  * num IRQ + (Y * 2) + 1 -> other_ipi (cpuX->cpuY)
  */
 
-// TODO: this is hardcoded for T8030
-#define AIC_INT_COUNT (576)
+/*
+ * The IRQ count comes from the device tree (ipid-mask: 576 on t8030, 704 on
+ * t8101). AIC_INT_COUNT is the most the AICv1 register map has room for:
+ * EIR_DEST is 0x3000..0x3FFF, one word per IRQ, and the per-EIR banks are 32
+ * words apart.
+ */
+#define AIC_INT_COUNT (1024)
 #define AIC_CPU_COUNT (6)
 #define AIC_VERSION   (2)
 
@@ -447,32 +452,32 @@ static void apple_aic_write(void* opaque, hwaddr addr, uint64_t data, unsigned s
             if (val & AIC_IPI_SELF) { qatomic_and(&o->deferredIPI, ~AIC_IPI_SELF); }
             break;
         }
-        case REG_AIC_EIR_DEST(0)... REG_AIC_EIR_DEST(AIC_INT_COUNT): {
+        case REG_AIC_EIR_DEST(0)... REG_AIC_EIR_DEST(AIC_INT_COUNT) - 4: {
             uint32_t vector = (addr - REG_AIC_EIR_DEST(0)) / 4;
             if (unlikely(vector >= s->numIRQ)) { break; }
             qatomic_set(&s->eir_dest[vector], val);
             break;
         }
-        case REG_AIC_EIR_SW_SET(0)... REG_AIC_EIR_SW_SET(kAIC_NUM_EIRS): {
+        case REG_AIC_EIR_SW_SET(0)... REG_AIC_EIR_SW_SET(kAIC_NUM_EIRS) - 4: {
             uint32_t eir = (addr - REG_AIC_EIR_SW_SET(0)) / 4;
             if (unlikely(eir >= s->numEIR)) { break; }
             qatomic_or(&s->eir_state[eir], val);
             apple_aic_deliver(s);
             break;
         }
-        case REG_AIC_EIR_SW_CLR(0)... REG_AIC_EIR_SW_CLR(kAIC_NUM_EIRS): {
+        case REG_AIC_EIR_SW_CLR(0)... REG_AIC_EIR_SW_CLR(kAIC_NUM_EIRS) - 4: {
             uint32_t eir = (addr - REG_AIC_EIR_SW_CLR(0)) / 4;
             if (unlikely(eir >= s->numEIR)) { break; }
             qatomic_and(&s->eir_state[eir], ~val);
             break;
         }
-        case REG_AIC_EIR_MASK_SET(0)... REG_AIC_EIR_MASK_SET(kAIC_NUM_EIRS): {
+        case REG_AIC_EIR_MASK_SET(0)... REG_AIC_EIR_MASK_SET(kAIC_NUM_EIRS) - 4: {
             uint32_t eir = (addr - REG_AIC_EIR_MASK_SET(0)) / 4;
             if (unlikely(eir >= s->numEIR)) { break; }
             qatomic_or(&s->eir_mask[eir], val);
             break;
         }
-        case REG_AIC_EIR_MASK_CLR(0)... REG_AIC_EIR_MASK_CLR(kAIC_NUM_EIRS): {
+        case REG_AIC_EIR_MASK_CLR(0)... REG_AIC_EIR_MASK_CLR(kAIC_NUM_EIRS) - 4: {
             uint32_t eir = (addr - REG_AIC_EIR_MASK_CLR(0)) / 4;
 
             if (unlikely(eir >= s->numEIR)) { break; }
@@ -567,28 +572,28 @@ static uint64_t apple_aic_read(void* opaque, hwaddr addr, unsigned size)
         }
         case REG_AIC_IPI_MASK_SET                                  :
         case REG_AIC_IPI_MASK_CLR                                  : return qatomic_read(&o->ipi_mask);
-        case REG_AIC_EIR_DEST(0)... REG_AIC_EIR_DEST(AIC_INT_COUNT): {
+        case REG_AIC_EIR_DEST(0)... REG_AIC_EIR_DEST(AIC_INT_COUNT) - 4: {
             uint32_t vector = (addr - REG_AIC_EIR_DEST(0)) / 4;
 
             if (unlikely(vector >= s->numIRQ)) { break; }
 
             return qatomic_read(&s->eir_dest[vector]);
         }
-        case REG_AIC_EIR_MASK_SET(0)... REG_AIC_EIR_MASK_SET(kAIC_NUM_EIRS): {
+        case REG_AIC_EIR_MASK_SET(0)... REG_AIC_EIR_MASK_SET(kAIC_NUM_EIRS) - 4: {
             uint32_t eir = (addr - REG_AIC_EIR_MASK_SET(0)) / 4;
 
             if (unlikely(eir >= s->numEIR)) { break; }
 
             return qatomic_read(&s->eir_mask[eir]);
         }
-        case REG_AIC_EIR_MASK_CLR(0)... REG_AIC_EIR_MASK_CLR(kAIC_NUM_EIRS): {
+        case REG_AIC_EIR_MASK_CLR(0)... REG_AIC_EIR_MASK_CLR(kAIC_NUM_EIRS) - 4: {
             uint32_t eir = (addr - REG_AIC_EIR_MASK_CLR(0)) / 4;
 
             if (unlikely(eir >= s->numEIR)) { break; }
 
             return qatomic_read(&s->eir_mask[eir]);
         }
-        case REG_AIC_EIR_INT_RO(0)... REG_AIC_EIR_INT_RO(kAIC_NUM_EIRS): {
+        case REG_AIC_EIR_INT_RO(0)... REG_AIC_EIR_INT_RO(kAIC_NUM_EIRS) - 4: {
             uint32_t eir = (addr - REG_AIC_EIR_INT_RO(0)) / 4;
 
             if (unlikely(eir >= s->numEIR)) { break; }
@@ -694,10 +699,19 @@ SysBusDevice* apple_aic_create(uint32_t numCPU, AppleDTNode* node, AppleDTNode* 
     assert_nonnull(prop);
     s->numEIR = prop->len / 4;
     s->numIRQ = s->numEIR * 32;
+    if (s->numIRQ > AIC_INT_COUNT) {
+        error_setg(&error_fatal, "AIC: %u IRQs in the device tree, the model supports %u", s->numIRQ, AIC_INT_COUNT);
+    }
     s->numCPU = numCPU;
 
     s->time_base =
         apple_dt_get_prop_u64(timebase_node, "reg", &error_warn) - apple_dt_get_prop_u64(node, "reg", &error_warn);
+    /*
+     * The aic reg is relative to arm-io. The t8030 device tree gives the
+     * timebase relative too; the t8101 (d53g) one gives it as an absolute
+     * address. arm-io sits at a multiple of 4 GiB and time_base is 32 bits
+     * wide, so the difference is the same offset either way.
+     */
 
     apple_dt_set_prop_u32(node, "#main-cpus", numCPU);
     apple_dt_set_prop_u32(node, "#shared-timestamps", 0);

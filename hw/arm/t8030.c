@@ -33,6 +33,7 @@
 #include "hw/arm/sep/emu.h"
 #include "hw/arm/sep/rom-idle.h"
 #include "hw/arm/t8030-config.c.inc"
+#include "hw/arm/t8101-config.c.inc"
 #include "hw/arm/t8030.h"
 #include "hw/audio/aop-audio.h"
 #include "hw/audio/cs35l27.h"
@@ -59,6 +60,7 @@
 #include "hw/misc/spmi-baseband.h"
 #include "hw/misc/spmi-pmu.h"
 #include "hw/sensor/tempsensor.h"
+#include "hw/misc/a7iop/mailbox/core.h"
 #include "hw/misc/unimp.h"
 #include "hw/nvram/apple_nvram.h"
 #include "hw/pci-host/apcie.h"
@@ -122,15 +124,9 @@
 #define SEPROM_BASE (0x240000000)
 #define SEPROM_SIZE (8 * MiB)
 
-#define SPI0_IRQ     (444)
-#define GPIO_SPI0_CS (204)
-#define SPI0_BASE    (0x35100000)
-
-#define GPIO_FORCE_DFU (161)
+#define SPI0_BASE (0x35100000)
 
 #define DISPLAY_SIZE (68 * MiB)
-
-#define DWC2_IRQ (495)
 
 #define NUM_UARTS (9)
 
@@ -184,6 +180,193 @@
 
 #define FUSE_ENABLED  (0xA55AC33C)
 #define FUSE_DISABLED (0xA050C030)
+
+#define SOC_PROP(_name, _array) {.name = (_name), .data = (_array), .len = sizeof(_array)}
+
+static const AppleSoCDTProp t8030_pmgr_props[] = {
+    SOC_PROP("voltage-states0", t8030_voltage_states0),
+    SOC_PROP("voltage-states1", t8030_voltage_states1),
+    SOC_PROP("voltage-states2", t8030_voltage_states2),
+    SOC_PROP("voltage-states5", t8030_voltage_states5),
+    SOC_PROP("voltage-states8", t8030_voltage_states8),
+    SOC_PROP("voltage-states9", t8030_voltage_states9),
+    SOC_PROP("voltage-states10", t8030_voltage_states10),
+    SOC_PROP("voltage-states11", t8030_voltage_states11),
+    SOC_PROP("voltage-states1-sram", t8030_voltage_states1_sram),
+    SOC_PROP("voltage-states2-sram", t8030_voltage_states2_sram),
+    SOC_PROP("voltage-states5-sram", t8030_voltage_states5_sram),
+    SOC_PROP("voltage-states8-sram", t8030_voltage_states8_sram),
+    SOC_PROP("voltage-states9-sram", t8030_voltage_states9_sram),
+    SOC_PROP("bridge-settings-0", t8030_bridge_settings0),
+    SOC_PROP("bridge-settings-1", t8030_bridge_settings1),
+    SOC_PROP("bridge-settings-2", t8030_bridge_settings2),
+    SOC_PROP("bridge-settings-3", t8030_bridge_settings3),
+    SOC_PROP("bridge-settings-4", t8030_bridge_settings4),
+    SOC_PROP("bridge-settings-5", t8030_bridge_settings5),
+    SOC_PROP("bridge-settings-6", t8030_bridge_settings6),
+    SOC_PROP("bridge-settings-7", t8030_bridge_settings7),
+    SOC_PROP("bridge-settings-8", t8030_bridge_settings8),
+    SOC_PROP("bridge-settings-12", t8030_bridge_settings12),
+    SOC_PROP("bridge-settings-13", t8030_bridge_settings13),
+    SOC_PROP("bridge-settings-14", t8030_bridge_settings14),
+    SOC_PROP("bridge-settings-15", t8030_bridge_settings15),
+    SOC_PROP("bridge-settings-16", t8030_bridge_settings16),
+    SOC_PROP("bridge-settings-17", t8030_bridge_settings17),
+};
+
+static const AppleSoCDTProp t8030_armio_props[] = {
+    SOC_PROP("clock-frequencies", t8030_clock_frequencies),
+    SOC_PROP("clock-frequencies-nclk", t8030_clock_frequencies_nclk),
+};
+
+static const AppleSoCConfig t8030_soc = {
+    .gen                   = APPLE_SOC_T8030,
+    .name                  = "t8030",
+    .desc                  = "Apple T8030 SoC (iPhone 11)",
+    .cpu_type              = TYPE_APPLE_A13,
+    .chip_id               = 0x8030,
+    .board_id              = 0x4,
+    .chip_revision         = 0x20,
+    .target_type           = "n104sim",
+    .dev_compatible        = "N104DEV\0iPhone12,1\0AppleARM",
+    .dev_compatible_len    = 28,
+    .display_scale         = 2,
+    .disp_width            = 828,
+    .disp_height           = 1792,
+    .regulatory_model      = "INFERN8030",
+    .real_sep              = true,
+    .pmgr_cpu_start        = 0xD4004,
+    .pmgr_sep_ps           = 0x80C00,
+    .pmgr_sram_check       = 0xF0010,
+    .pmgr_sram_check_value = 0x5000,
+    .pmgr_ps_lo            = 0x80000,
+    .pmgr_ps_hi            = 0x8C000,
+    .pmp_base              = 0x3BC00000,
+    .pmp_size              = 0x60000,
+    .pmgr_props            = t8030_pmgr_props,
+    .pmgr_props_count      = ARRAY_SIZE(t8030_pmgr_props),
+    .armio_props           = t8030_armio_props,
+    .armio_props_count     = ARRAY_SIZE(t8030_armio_props),
+    .spi0_irq              = 444,
+    .gpio_spi0_cs          = 204,
+    .gpio_force_dfu        = 161,
+    .dwc2_irq              = 495,
+};
+
+/*
+ * A14 (t8101), first target iPhone 12 (d53g). Values come from the d53g
+ * device-tree layout, the M1 (t8103) as documented by Asahi Linux, or are
+ * synthesized; see docs/T8101-SCOPE.md section 9 for which is which.
+ */
+static const AppleSoCDTProp t8101_pmgr_props[] = {
+    SOC_PROP("voltage-states0", t8030_voltage_states0),
+    SOC_PROP("voltage-states1", t8030_voltage_states1),
+    SOC_PROP("voltage-states2", t8030_voltage_states2),
+    SOC_PROP("voltage-states5", t8030_voltage_states5),
+    SOC_PROP("voltage-states8", t8030_voltage_states8),
+    SOC_PROP("voltage-states9", t8030_voltage_states9),
+    SOC_PROP("voltage-states10", t8030_voltage_states10),
+    SOC_PROP("voltage-states11", t8030_voltage_states11),
+    SOC_PROP("voltage-states1-sram", t8030_voltage_states1_sram),
+    SOC_PROP("voltage-states2-sram", t8030_voltage_states2_sram),
+    SOC_PROP("voltage-states5-sram", t8030_voltage_states5_sram),
+    SOC_PROP("voltage-states8-sram", t8030_voltage_states8_sram),
+    SOC_PROP("voltage-states9-sram", t8030_voltage_states9_sram),
+    SOC_PROP("bridge-settings-0", t8030_bridge_settings0),
+    SOC_PROP("bridge-settings-1", t8030_bridge_settings1),
+    SOC_PROP("bridge-settings-2", t8030_bridge_settings2),
+    SOC_PROP("bridge-settings-3", t8030_bridge_settings3),
+    SOC_PROP("bridge-settings-4", t8030_bridge_settings4),
+    SOC_PROP("bridge-settings-5", t8030_bridge_settings5),
+    SOC_PROP("bridge-settings-6", t8030_bridge_settings6),
+    SOC_PROP("bridge-settings-7", t8030_bridge_settings7),
+    SOC_PROP("bridge-settings-8", t8030_bridge_settings8),
+    SOC_PROP("bridge-settings-9", t8101_bridge_settings9),
+    SOC_PROP("bridge-settings-10", t8101_bridge_settings10),
+    SOC_PROP("bridge-settings-11", t8101_bridge_settings11),
+    SOC_PROP("bridge-settings-12", t8030_bridge_settings12),
+    SOC_PROP("bridge-settings-13", t8030_bridge_settings13),
+    SOC_PROP("bridge-settings-14", t8030_bridge_settings14),
+    SOC_PROP("bridge-settings-15", t8030_bridge_settings15),
+    SOC_PROP("bridge-settings-16", t8030_bridge_settings16),
+    SOC_PROP("bridge-settings-17", t8030_bridge_settings17),
+};
+
+static const char* const t8101_rem_nodes[] = {
+    /* DCP era display: needs a DCP RTKit HLE (scope doc 1.3). Headless. */
+    "dcp",
+    "dart-dcp",
+    "dcp0-expert",
+    "dcp-sac-controller",
+    /* USB comes later (T3). */
+    "usb-drd",
+    "atc-phy",
+    "dart-usb",
+    /* Temperature sensors: not modelled for this SoC yet. */
+    "tempsensor0",
+    "tempsensor1",
+    "tempsensor2",
+    "mtrtempsensor3",
+    "mtrtempsensor4",
+    "mtrtempsensor5",
+    "mtrtempsensor6",
+    "mtrtempsensor7",
+    "mtrtempsensor8",
+    "mtrtempsensor9",
+    "mtrtempsensor10",
+    "mtrtempsensor11",
+    "mtrtempsensor12",
+    "mtrtempsensor13",
+    "mtrtempsensor14",
+    "mtrtempsensor15",
+    "mtrtempsensor16",
+    "mtrtempsensor17",
+    "mtrtempsensor18",
+    "mtrtempsensor19",
+    "mtrtempsensor20",
+    /* Not modelled. */
+    "sgx",
+    "aop-spmi0",
+    "admac-aop-audio",
+    "admac-sio",
+};
+
+static const AppleSoCConfig t8101_soc = {
+    .gen                   = APPLE_SOC_T8101,
+    .name                  = "t8101",
+    .desc                  = "Apple T8101 SoC (iPhone 12, experimental)",
+    .cpu_type              = TYPE_APPLE_A14,
+    .chip_id               = 0x8101,
+    .board_id              = 0xC,
+    .chip_revision         = 0x11,
+    .target_type           = "d53gsim",
+    .dev_compatible        = "D53gDEV\0iPhone13,2\0AppleARM",
+    .dev_compatible_len    = 28,
+    .display_scale         = 3,
+    .disp_width            = 1170,
+    .disp_height           = 2532,
+    .regulatory_model      = "INFERN8101",
+    .real_sep              = false,
+    .pmgr_cpu_start        = 0x54004,
+    .pmgr_sep_ps           = 0xC00,
+    .pmgr_sram_check       = 0,
+    .pmgr_ps_lo            = 0x0,
+    .pmgr_ps_hi            = 0x10100,
+    .pmgr_aon_ps_lo        = 0x3D280000,
+    .pmgr_aon_ps_hi        = 0x3D290000,
+    .pmp_base              = 0,
+    .pmp_size              = 0,
+    .pmgr_props            = t8101_pmgr_props,
+    .pmgr_props_count      = ARRAY_SIZE(t8101_pmgr_props),
+    .armio_props           = t8030_armio_props,
+    .armio_props_count     = ARRAY_SIZE(t8030_armio_props),
+    .spi0_irq              = 515,
+    .gpio_spi0_cs          = 204,
+    .gpio_force_dfu        = 161,
+    .dwc2_irq              = 569,
+    .rem_nodes             = t8101_rem_nodes,
+    .rem_nodes_count       = ARRAY_SIZE(t8101_rem_nodes),
+};
 
 static uint32_t t8030_real_cpu_count(AppleT8030MachineState* t8030)
 { return MACHINE(t8030)->smp.cpus - (t8030->sep_fw_filename != NULL); }
@@ -1092,7 +1275,7 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
     // iOS 16+ kernel panics because of the AP ticket,
     // as it names it "n104dev" and then tries to read
     // "n104ap" after restore.
-    apple_dt_set_prop(t8030->device_tree, "compatible", 28, "N104DEV\0iPhone12,1\0AppleARM");
+    apple_dt_set_prop(t8030->device_tree, "compatible", t8030->soc->dev_compatible_len, t8030->soc->dev_compatible);
 
     if (!apple_boot_contains_boot_arg(cmdline, "rd=", true)) {
         apple_dt_set_prop_strn(chosen, "root-matching", 256,
@@ -1171,10 +1354,33 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
 static uint64_t pmgr_unk_e4800            = 0;
 static uint32_t pmgr_unk_e4000[0x180 / 4] = {0};
 
+/*
+ * t8101: the always-on PMGR power-state registers sit in a catch-all range
+ * (`pmgr` reg[1]). Keep what the kernel writes there and mirror the target
+ * power state into the actual state like pmgr_reg_write() does. t8030 does
+ * not use this (its catch-all ranges keep their historical behaviour).
+ */
+static GHashTable* pmgr_aon_store;
+
+static bool pmgr_aon_ps(const AppleSoCConfig* soc, hwaddr a)
+{ return soc->pmgr_aon_ps_hi != 0 && a >= soc->pmgr_aon_ps_lo && a < soc->pmgr_aon_ps_hi; }
+
 static void pmgr_unk_reg_write(void* opaque, hwaddr addr, uint64_t data, unsigned size)
 {
     hwaddr base = (hwaddr)opaque;
     hwaddr i;
+
+    if (pmgr_aon_ps(APPLE_T8030(qdev_get_machine())->soc, base + addr)) {
+        if (pmgr_aon_store == NULL) { pmgr_aon_store = g_hash_table_new(g_direct_hash, g_direct_equal); }
+        data = deposit64(data, 4, 4, extract64(data, 0, 4));
+        g_hash_table_insert(pmgr_aon_store, GSIZE_TO_POINTER(base + addr), GSIZE_TO_POINTER((uint32_t)data));
+        if (size == 8) {
+            data = deposit64(data, 32 + 4, 4, extract64(data, 32, 4));
+            g_hash_table_insert(pmgr_aon_store, GSIZE_TO_POINTER(base + addr + 4),
+                                GSIZE_TO_POINTER((uint32_t)(data >> 32)));
+        }
+        return;
+    }
 
     switch (base + addr) {
         case 0x3D2E4800:    // ???? 0x240002c00 and 0x2400037a4
@@ -1223,6 +1429,37 @@ static uint64_t pmgr_unk_reg_read(void* opaque, hwaddr addr, unsigned size)
     bool     raw_secure_mode         = true;
     uint32_t sep_bit30_current_value = 0;
     bool     fuses_locked            = true;
+
+    if (t8030->soc->gen == APPLE_SOC_T8101) {
+        switch ((base + addr) & ~(hwaddr)0x01000004) {
+            case 0x10E206A8:
+            case 0x10E206E0:
+            case 0x10E206E8: {
+                /*
+                 * Per-cluster (E at 0x10E2xxxx, P at 0x11E2xxxx) DVMR weight
+                 * maps: AppleT8101PMGR::getTunedDVMRWeightType() looks for the
+                 * nibble that equals the performance state and asserts if
+                 * there is none. Identity map: nibble n = n (made up; the
+                 * real values are tuned per part).
+                 */
+                uint64_t map = 0xFEDCBA9876543210ULL;
+                return size == 8 ? map : extract64(map, ((base + addr) & 4) * 8, 32);
+            }
+            default: break;
+        }
+    }
+
+    if (pmgr_aon_ps(t8030->soc, base + addr) && pmgr_aon_store != NULL) {
+        gpointer v;
+        if (g_hash_table_lookup_extended(pmgr_aon_store, GSIZE_TO_POINTER(base + addr), NULL, &v)) {
+            uint64_t r = GPOINTER_TO_SIZE(v);
+            if (size == 8) {
+                r |= (uint64_t)GPOINTER_TO_SIZE(g_hash_table_lookup(pmgr_aon_store, GSIZE_TO_POINTER(base + addr + 4)))
+                     << 32;
+            }
+            return r;
+        }
+    }
 
     switch (base + addr) {
         case 0x3D280088:    // PMGR_AON
@@ -1331,28 +1568,29 @@ static void pmgr_reg_write(void* opaque, hwaddr addr, uint64_t data, unsigned si
                   addr, data);
 #endif
 
-    if (addr >= 0x80000 && addr <= 0x8C000) {
+    if (addr >= t8030->soc->pmgr_ps_lo && addr <= t8030->soc->pmgr_ps_hi) {
         data = deposit64(data, 4, 4, extract64(data, 0, 4));
         if (size == 8) { data = deposit64(data, 32 + 4, 4, extract64(data, 32, 4)); }
     }
 
-    switch (addr) {
-        case 0xD4004: t8030_start_cpus(t8030, data); return;
-        case 0x80C00:    // SEP_PS
-            sep = APPLE_SEP(object_property_get_link(OBJECT(t8030), "sep", NULL));
+    if (addr == t8030->soc->pmgr_cpu_start) {
+        t8030_start_cpus(t8030, data);
+        return;
+    }
 
-            // A parked SEP core (idle-only placeholder ROM) stays off.
-            if (sep != NULL && !apple_sep_is_cpu_parked(sep)) {
-                if (data & BIT32(31)) { apple_a13_reset(APPLE_A13(apple_sep_get_cpu(sep))); }
-                else if (data & BIT32(10)) {
-                    apple_a13_set_off(APPLE_A13(apple_sep_get_cpu(sep)));
-                }
-                else {
-                    apple_a13_set_on(APPLE_A13(apple_sep_get_cpu(sep)));
-                }
+    if (addr == t8030->soc->pmgr_sep_ps) {    // SEP_PS
+        sep = APPLE_SEP(object_property_get_link(OBJECT(t8030), "sep", NULL));
+
+        // A parked SEP core (idle-only placeholder ROM) stays off.
+        if (sep != NULL && !apple_sep_is_cpu_parked(sep)) {
+            if (data & BIT32(31)) { apple_a13_reset(APPLE_A13(apple_sep_get_cpu(sep))); }
+            else if (data & BIT32(10)) {
+                apple_a13_set_off(APPLE_A13(apple_sep_get_cpu(sep)));
             }
-            break;
-        default: break;
+            else {
+                apple_a13_set_on(APPLE_A13(apple_sep_get_cpu(sep)));
+            }
+        }
     }
 
     if (size == 8) { stq_le_p(t8030->pmgr_reg + addr, data); }
@@ -1366,11 +1604,12 @@ static uint64_t pmgr_reg_read(void* opaque, hwaddr addr, unsigned size)
     AppleT8030MachineState* t8030  = opaque;
     uint64_t                result = 0;
 
-    switch (addr) {
-        case 0xF0010:    // AppleT8030PMGR::commonSramCheck
-            result = 0x5000;
-            break;
-        default: result = size == 8 ? ldq_le_p(t8030->pmgr_reg + addr) : ldl_le_p(t8030->pmgr_reg + addr); break;
+    if (t8030->soc->pmgr_sram_check != 0 && addr == t8030->soc->pmgr_sram_check) {
+        // AppleT8030PMGR::commonSramCheck
+        result = t8030->soc->pmgr_sram_check_value;
+    }
+    else {
+        result = size == 8 ? ldq_le_p(t8030->pmgr_reg + addr) : ldl_le_p(t8030->pmgr_reg + addr);
     }
 
 #if 0
@@ -1483,7 +1722,7 @@ static void t8030_cpu_setup(AppleT8030MachineState* t8030)
             continue;
         }
 
-        t8030->cpus[i] = apple_a13_from_node(node);
+        t8030->cpus[i] = apple_a13_from_node_type(node, t8030->soc->cpu_type);
         cluster_id     = t8030->cpus[i]->cluster_id;
 
         object_property_add_child(OBJECT(&t8030->clusters[cluster_id]), DEVICE(t8030->cpus[i])->id,
@@ -1555,42 +1794,30 @@ static void t8030_pmgr_setup(AppleT8030MachineState* t8030)
                                     reg[i] + reg[i + 1] < t8030->armio_size ? t8030->armio_base + reg[i] : reg[i], mem);
     }
 
-    MemoryRegion* mem = g_new(MemoryRegion, 1);
+    if (t8030->soc->pmp_size != 0) {
+        MemoryRegion* mem = g_new(MemoryRegion, 1);
 
-    snprintf(name, 32, "pmp-reg");
-    memory_region_init_io(mem, OBJECT(t8030), &pmgr_unk_reg_ops, (void*)0x3BC00000, name, 0x60000);
-    memory_region_add_subregion(get_system_memory(), t8030->armio_base + 0x3BC00000, mem);
+        snprintf(name, 32, "pmp-reg");
+        memory_region_init_io(mem, OBJECT(t8030), &pmgr_unk_reg_ops, (void*)t8030->soc->pmp_base, name,
+                              t8030->soc->pmp_size);
+        memory_region_add_subregion(get_system_memory(), t8030->armio_base + t8030->soc->pmp_base, mem);
+    }
 
-    apple_dt_set_prop(child, "voltage-states0", sizeof(t8030_voltage_states0), t8030_voltage_states0);
-    apple_dt_set_prop(child, "voltage-states1", sizeof(t8030_voltage_states1), t8030_voltage_states1);
-    apple_dt_set_prop(child, "voltage-states2", sizeof(t8030_voltage_states2), t8030_voltage_states2);
-    apple_dt_set_prop(child, "voltage-states5", sizeof(t8030_voltage_states5), t8030_voltage_states5);
-    apple_dt_set_prop(child, "voltage-states8", sizeof(t8030_voltage_states8), t8030_voltage_states8);
-    apple_dt_set_prop(child, "voltage-states9", sizeof(t8030_voltage_states9), t8030_voltage_states9);
-    apple_dt_set_prop(child, "voltage-states10", sizeof(t8030_voltage_states10), t8030_voltage_states10);
-    apple_dt_set_prop(child, "voltage-states11", sizeof(t8030_voltage_states11), t8030_voltage_states11);
+    for (i = 0; i < t8030->soc->pmgr_props_count; ++i) {
+        const AppleSoCDTProp* p = &t8030->soc->pmgr_props[i];
+        apple_dt_set_prop(child, p->name, p->len, p->data);
+    }
 
-    apple_dt_set_prop(child, "voltage-states1-sram", sizeof(t8030_voltage_states1_sram), t8030_voltage_states1_sram);
-    apple_dt_set_prop(child, "voltage-states2-sram", sizeof(t8030_voltage_states2_sram), t8030_voltage_states2_sram);
-    apple_dt_set_prop(child, "voltage-states5-sram", sizeof(t8030_voltage_states5_sram), t8030_voltage_states5_sram);
-    apple_dt_set_prop(child, "voltage-states8-sram", sizeof(t8030_voltage_states8_sram), t8030_voltage_states8_sram);
-    apple_dt_set_prop(child, "voltage-states9-sram", sizeof(t8030_voltage_states9_sram), t8030_voltage_states9_sram);
-
-    apple_dt_set_prop(child, "bridge-settings-0", sizeof(t8030_bridge_settings0), t8030_bridge_settings0);
-    apple_dt_set_prop(child, "bridge-settings-1", sizeof(t8030_bridge_settings1), t8030_bridge_settings1);
-    apple_dt_set_prop(child, "bridge-settings-2", sizeof(t8030_bridge_settings2), t8030_bridge_settings2);
-    apple_dt_set_prop(child, "bridge-settings-3", sizeof(t8030_bridge_settings3), t8030_bridge_settings3);
-    apple_dt_set_prop(child, "bridge-settings-4", sizeof(t8030_bridge_settings4), t8030_bridge_settings4);
-    apple_dt_set_prop(child, "bridge-settings-5", sizeof(t8030_bridge_settings5), t8030_bridge_settings5);
-    apple_dt_set_prop(child, "bridge-settings-6", sizeof(t8030_bridge_settings6), t8030_bridge_settings6);
-    apple_dt_set_prop(child, "bridge-settings-7", sizeof(t8030_bridge_settings7), t8030_bridge_settings7);
-    apple_dt_set_prop(child, "bridge-settings-8", sizeof(t8030_bridge_settings8), t8030_bridge_settings8);
-    apple_dt_set_prop(child, "bridge-settings-12", sizeof(t8030_bridge_settings12), t8030_bridge_settings12);
-    apple_dt_set_prop(child, "bridge-settings-13", sizeof(t8030_bridge_settings13), t8030_bridge_settings13);
-    apple_dt_set_prop(child, "bridge-settings-14", sizeof(t8030_bridge_settings14), t8030_bridge_settings14);
-    apple_dt_set_prop(child, "bridge-settings-15", sizeof(t8030_bridge_settings15), t8030_bridge_settings15);
-    apple_dt_set_prop(child, "bridge-settings-16", sizeof(t8030_bridge_settings16), t8030_bridge_settings16);
-    apple_dt_set_prop(child, "bridge-settings-17", sizeof(t8030_bridge_settings17), t8030_bridge_settings17);
+    if (t8030->soc->gen == APPLE_SOC_T8101) {
+        /*
+         * AppleT8101PMGR::initDriver() requires the tunable-selection keys
+         * iBoot adds to the pmgr node (names from the kernel's strings). The
+         * values follow this machine's identity: board-id, chip revision B1.
+         */
+        apple_dt_set_prop_u32(child, "tunableh-board-id", t8030->soc->board_id);
+        apple_dt_set_prop_u32(child, "tunableh-major-rev", t8030->soc->chip_revision >> 4);
+        apple_dt_set_prop_u32(child, "tunableh-minor-rev", t8030->soc->chip_revision & 0xF);
+    }
 }
 
 static void t8030_amcc_setup(AppleT8030MachineState* t8030)
@@ -1872,11 +2099,11 @@ static void t8030_create_spi0(AppleT8030MachineState* t8030)
 
     sysbus_mmio_map(SYS_BUS_DEVICE(spi), 0, t8030->armio_base + SPI0_BASE);
 
-    sysbus_connect_irq(SYS_BUS_DEVICE(spi), 0, qdev_get_gpio_in(DEVICE(t8030->aic), SPI0_IRQ));
+    sysbus_connect_irq(SYS_BUS_DEVICE(spi), 0, qdev_get_gpio_in(DEVICE(t8030->aic), t8030->soc->spi0_irq));
     // The second sysbus IRQ is the cs line
     gpio = DEVICE(object_property_get_link(OBJECT(t8030), "gpio", &error_fatal));
     assert_nonnull(gpio);
-    qdev_connect_gpio_out(gpio, GPIO_SPI0_CS, qdev_get_gpio_in_named(spi, SSI_GPIO_CS, 0));
+    qdev_connect_gpio_out(gpio, t8030->soc->gpio_spi0_cs, qdev_get_gpio_in_named(spi, SSI_GPIO_CS, 0));
 }
 
 static void t8030_create_spi(AppleT8030MachineState* t8030, uint32_t port)
@@ -1982,7 +2209,7 @@ static void t8030_create_usb(AppleT8030MachineState* t8030)
     for (int i = 0; i < 4; ++i) {
         sysbus_connect_irq(SYS_BUS_DEVICE(atc), i, qdev_get_gpio_in(DEVICE(t8030->aic), ints[i]));
     }
-    sysbus_connect_irq(SYS_BUS_DEVICE(atc), 4, qdev_get_gpio_in(DEVICE(t8030->aic), DWC2_IRQ));
+    sysbus_connect_irq(SYS_BUS_DEVICE(atc), 4, qdev_get_gpio_in(DEVICE(t8030->aic), t8030->soc->dwc2_irq));
 }
 
 static void t8030_create_wdt(AppleT8030MachineState* t8030)
@@ -2435,10 +2662,13 @@ static void t8030_create_misc(AppleT8030MachineState* t8030)
     apple_dt_set_prop(chosen, "mac-address-bluetooth0", 6, (const uint8_t[]){0xDE, 0xAD, 0xBE, 0xEF, 0x42, 0x42});
 
     child = apple_dt_get_node(armio, "usb-drd");
-    assert_nonnull(child);
+    // t8101 boots without USB for now (t8101_rem_nodes).
+    if (t8030->soc->gen != APPLE_SOC_T8101) { assert_nonnull(child); }
 
-    apple_dt_set_prop(child, "device-mac-address", 6, (const uint8_t[]){0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x22});
-    apple_dt_set_prop(child, "host-mac-address", 6, (const uint8_t[]){0xDE, 0xAD, 0xBE, 0xEF, 0x22, 0x12});
+    if (child != NULL) {
+        apple_dt_set_prop(child, "device-mac-address", 6, (const uint8_t[]){0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x22});
+        apple_dt_set_prop(child, "host-mac-address", 6, (const uint8_t[]){0xDE, 0xAD, 0xBE, 0xEF, 0x22, 0x12});
+    }
 
     apple_dt_set_prop(chosen, "mac-address-ethernet0", 6, (const uint8_t[]){0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x22});
     apple_dt_set_prop(chosen, "mac-address-wifi0", 6, (const uint8_t[]){0xDE, 0xAD, 0xBE, 0xEF, 0x22, 0x12});
@@ -3036,6 +3266,7 @@ static void t8030_reset(MachineState* machine, ResetType type)
     // maybe also reset pmgr_unk_e4000 array
     // Ah, what the heck. Let's do it.
     memset(pmgr_unk_e4000, 0, sizeof(pmgr_unk_e4000));
+    if (pmgr_aon_store != NULL) { g_hash_table_remove_all(pmgr_aon_store); }
 
     qemu_devices_reset(type);
 
@@ -3044,7 +3275,7 @@ static void t8030_reset(MachineState* machine, ResetType type)
     t8030_cpu_reset(t8030);
 
     gpio = DEVICE(object_property_get_link(OBJECT(t8030), "gpio", &error_fatal));
-    qemu_set_irq(qdev_get_gpio_in(gpio, GPIO_FORCE_DFU), t8030->force_dfu);
+    qemu_set_irq(qdev_get_gpio_in(gpio, t8030->soc->gpio_force_dfu), t8030->force_dfu);
 }
 
 static void t8030_init_done(Notifier* notifier, void* data)
@@ -3052,6 +3283,150 @@ static void t8030_init_done(Notifier* notifier, void* data)
     AppleT8030MachineState* t8030 = container_of(notifier, AppleT8030MachineState, init_done_notifier);
     t8030_memory_setup(t8030);
     t8030_cpu_reset(t8030);
+}
+
+static void t8030_create_devices(AppleT8030MachineState* t8030)
+{
+    t8030_create_gpio(t8030, "gpio");
+    t8030_create_gpio(t8030, "smc-gpio");
+    t8030_create_gpio(t8030, "nub-gpio");
+    t8030_create_gpio(t8030, "aop-gpio");
+    t8030_create_i2c(t8030, "i2c0");
+    t8030_create_i2c(t8030, "i2c1");
+    t8030_create_i2c(t8030, "i2c2");
+    t8030_create_i2c(t8030, "i2c3");
+    t8030_create_i2c(t8030, "smc-i2c0");
+    t8030_create_i2c(t8030, "smc-i2c1");
+    t8030_create_dart(t8030, "dart-usb", false);
+    t8030_create_dart(t8030, "dart-sio", false);
+    t8030_create_dart(t8030, "dart-disp0", false);
+    t8030_create_dart(t8030, "dart-sep", false);
+    t8030_create_dart(t8030, "dart-apcie2", true);
+    t8030_create_dart(t8030, "dart-apcie3", true);
+    t8030_create_dart(t8030, "dart-aop", false);
+    t8030_create_dart(t8030, "dart-rsm", false);
+    t8030_create_dart(t8030, "dart-scaler", false);
+    t8030_create_pcie(t8030);
+    t8030_create_ans(t8030);
+    t8030_create_usb(t8030);
+    t8030_create_wdt(t8030);
+    t8030_create_aes(t8030);
+    t8030_create_spmi(t8030, "spmi0");
+    t8030_create_spmi(t8030, "spmi1");
+    t8030_create_spmi(t8030, "spmi2");
+    t8030_create_pmu(t8030, "spmi0", "spmi-pmu");
+    t8030_create_smc(t8030);
+#ifdef ENABLE_BASEBAND
+    t8030_create_baseband_spmi(t8030, "spmi1", "baseband-spmi");
+    t8030_create_baseband(t8030);
+#endif
+    t8030_create_sio(t8030);
+    t8030_create_spi0(t8030);
+    t8030_create_spi(t8030, 1);
+    t8030_create_spi(t8030, 3);
+
+    if (t8030->sep_rom_filename && t8030->sep_fw_filename) { t8030_create_sep(t8030); }
+    else {
+#ifdef ENABLE_DATA_ENCRYPTION
+        error_setg(&error_fatal, "Simulated SEP cannot be used with data "
+                                 "encryption at the moment.");
+        return;
+#else
+        t8030_create_sep_sim(t8030);
+#endif
+    }
+
+    t8030_create_roswell(t8030);
+    t8030_create_lm_backlight(t8030);
+    t8030_create_display_pmu(t8030);
+    t8030_create_display(t8030);
+    t8030_create_mt_spi(t8030);
+    t8030_create_aop(t8030);
+    if (t8030->gpu) { t8030_create_gpu(t8030); }
+    t8030_create_mca(t8030);
+    t8030_create_speaker_top(t8030);
+    t8030_create_speaker_bottom(t8030);
+    t8030_create_buttons(t8030);
+    t8030_create_mipi_dsim(t8030);
+    t8030_create_scaler(t8030);
+    t8030_create_accbuck(t8030);
+    t8030_create_misc(t8030);
+
+    t8030_create_tempsensor(t8030, "tempsensor0", false);
+    t8030_create_tempsensor(t8030, "tempsensor1", false);
+    t8030_create_tempsensor(t8030, "tempsensor2", false);
+    t8030_create_tempsensor(t8030, "tempsensor3", false);
+    t8030_create_tempsensor(t8030, "tempsensor4", false);
+    t8030_create_tempsensor(t8030, "tempsensor5", false);
+    t8030_create_tempsensor(t8030, "mtrtempsensor6", true);
+    t8030_create_tempsensor(t8030, "mtrtempsensor7", true);
+    t8030_create_tempsensor(t8030, "mtrtempsensor8", true);
+    t8030_create_tempsensor(t8030, "mtrtempsensor11", false);
+    t8030_create_tempsensor(t8030, "mtrtempsensor13", false);
+    t8030_create_mtr_tempsensor(t8030, "mtrtempsensor14");
+    t8030_create_mtr_tempsensor(t8030, "mtrtempsensor15");
+    t8030_create_mic_temp_sensor2(t8030);
+}
+
+/*
+ * t8101 (d53g) T1 device set: what the iPhone 12 device tree has and the
+ * existing models cover. Absent t8030 nodes (i2c0/i2c1, smc-i2c0, spmi0-2,
+ * mipi-dsim, uart7, the old temperature sensors) are not created; the DCP
+ * and USB nodes are deleted earlier (t8101_rem_nodes). Not created yet
+ * either: SPI (d53g has the M1-style "spi-1,spimc" controller, not the
+ * Samsung one apple_spi models, so no multi-touch) and SPMI ("spmi,t8101",
+ * hence no PMU). Which nodes the kernel sees is decided by boot.c's
+ * KEEP_COMP list.
+ */
+static void t8101_create_devices(AppleT8030MachineState* t8030)
+{
+    t8030_create_gpio(t8030, "gpio");
+    t8030_create_gpio(t8030, "smc-gpio");
+    t8030_create_gpio(t8030, "nub-gpio");
+    t8030_create_gpio(t8030, "aop-gpio");
+    t8030_create_i2c(t8030, "i2c2");
+    t8030_create_i2c(t8030, "i2c3");
+    t8030_create_i2c(t8030, "smc-i2c1");
+    t8030_create_dart(t8030, "dart-sio", false);
+    t8030_create_dart(t8030, "dart-disp0", false);
+    t8030_create_dart(t8030, "dart-sep", false);
+    t8030_create_dart(t8030, "dart-aop", false);
+    t8030_create_dart(t8030, "dart-rsm", false);
+    t8030_create_dart(t8030, "dart-scaler", false);
+    t8030_create_dart(t8030, "dart-apcie1", true);
+    t8030_create_dart(t8030, "dart-apcie2", true);
+    /* The ANS NVMe controller sits behind the model's PCIe bridge 0. */
+    t8030_create_pcie(t8030);
+    /*
+     * With nvme-linear-sq the kernel picks AppleANS3NVMeController, whose
+     * CoastGuard setup fails in pmap_iommu_map() (as with t8030's
+     * nvme-coastguard, see boot.c REM_PROPS). Without it the ANS2 driver
+     * the model was written for matches.
+     */
+    apple_dt_del_prop_named(apple_dt_get_node(t8030->device_tree, "arm-io/ans"), "nvme-linear-sq");
+    t8030_create_ans(t8030);
+    t8030_create_wdt(t8030);
+    t8030_create_aes(t8030);
+    t8030_create_smc(t8030);
+    t8030_create_sio(t8030);
+    if (t8030->sep_rom_filename && t8030->sep_fw_filename) { t8030_create_sep(t8030); }
+    else {
+#ifdef ENABLE_DATA_ENCRYPTION
+        error_setg(&error_fatal, "Simulated SEP cannot be used with data encryption at the moment.");
+        return;
+#else
+        t8030_create_sep_sim(t8030);
+#endif
+    }
+    t8030_create_roswell(t8030);
+    t8030_create_display(t8030);
+    t8030_create_aop(t8030);
+    t8030_create_mca(t8030);
+    t8030_create_speaker_top(t8030);
+    t8030_create_buttons(t8030);
+    t8030_create_scaler(t8030);
+    t8030_create_accbuck(t8030);
+    t8030_create_misc(t8030);
 }
 
 static void t8030_init(MachineState* machine)
@@ -3063,7 +3438,26 @@ static void t8030_init(MachineState* machine)
     AppleDTProp*            prop;
     hwaddr*                 ranges;
 
-    t8030 = APPLE_T8030(machine);
+    t8030      = APPLE_T8030(machine);
+    t8030->soc = APPLE_T8030_GET_CLASS(machine)->soc;
+
+    // t8101's IOPs sit in "iop,ascwrap-v4" wrappers (other mailbox layout).
+    apple_a7iop_mailbox_set_ascwrap_v4(t8030->soc->gen == APPLE_SOC_T8101);
+
+    if (!t8030->soc->real_sep && t8030->sep_rom_filename != NULL) {
+        // Without the SoC's SEP values only a placeholder ROM that idles
+        // (the SEP core stays parked) can be used.
+        gchar* rom  = NULL;
+        gsize  size = 0;
+        bool   idle = g_file_get_contents(t8030->sep_rom_filename, &rom, &size, NULL) &&
+                    apple_sep_rom_is_idle_loop(rom, size);
+        g_free(rom);
+        if (!idle) {
+            error_setg(&error_fatal, "SEP emulation is not available on %s yet: use the simulated SEP or an "
+                                     "idle placeholder SEP ROM", t8030->soc->name);
+            return;
+        }
+    }
 
     if ((t8030->sep_fw_filename == NULL) != (t8030->sep_rom_filename == NULL)) {
         error_setg(&error_fatal, "You need to specify both the SEPROM and the decrypted "
@@ -3205,12 +3599,22 @@ static void t8030_init(MachineState* machine)
     child = apple_dt_get_node(t8030->device_tree, "arm-io");
     assert_nonnull(child);
 
-    t8030->chip_revision = 0x20;
+    t8030->chip_revision = t8030->soc->chip_revision;
     apple_dt_set_prop_u32(child, "chip-revision", t8030->chip_revision);
 
-    apple_dt_set_prop(child, "clock-frequencies", sizeof(t8030_clock_frequencies), t8030_clock_frequencies);
-    apple_dt_set_prop(child, "clock-frequencies-nclk", sizeof(t8030_clock_frequencies_nclk),
-                      t8030_clock_frequencies_nclk);
+    for (uint32_t i = 0; i < t8030->soc->armio_props_count; ++i) {
+        const AppleSoCDTProp* p = &t8030->soc->armio_props[i];
+        apple_dt_set_prop(child, p->name, p->len, p->data);
+    }
+
+    for (uint32_t i = 0; i < t8030->soc->rem_nodes_count; ++i) {
+        AppleDTNode* node = apple_dt_get_node(child, t8030->soc->rem_nodes[i]);
+        if (node != NULL) {
+            info_report("%s: device `%s` is not modelled yet, removed from the device tree", t8030->soc->name,
+                        t8030->soc->rem_nodes[i]);
+            apple_dt_del_node(child, node);
+        }
+    }
 
     prop = apple_dt_get_prop(child, "ranges");
     assert_nonnull(prop);
@@ -3219,7 +3623,7 @@ static void t8030_init(MachineState* machine)
     t8030->armio_base = ranges[1];
     t8030->armio_size = ranges[2];
 
-    apple_dt_set_prop_strn(t8030->device_tree, "platform-name", 32, "t8030");
+    apple_dt_set_prop_strn(t8030->device_tree, "platform-name", 32, t8030->soc->name);
     apple_dt_set_prop_strn(t8030->device_tree, "model-number", 32, t8030->model_number);
     apple_dt_set_prop_strn(t8030->device_tree, "region-info", 32, t8030->region_info);
     apple_dt_set_prop_strn(t8030->device_tree, "config-number", 64, t8030->config_number);
@@ -3228,8 +3632,8 @@ static void t8030_init(MachineState* machine)
     apple_dt_set_prop_strn(t8030->device_tree, "regulatory-model-number", 32, t8030->regulatory_model);
 
     child = apple_dt_get_node(t8030->device_tree, "chosen");
-    apple_dt_set_prop_u32(child, "chip-id", 0x8030);
-    t8030->board_id = 0x4;
+    apple_dt_set_prop_u32(child, "chip-id", t8030->soc->chip_id);
+    t8030->board_id = t8030->soc->board_id;
     apple_dt_set_prop_u32(child, "board-id", t8030->board_id);
     apple_dt_set_prop_u32(child, "certificate-production-status", 1);
     apple_dt_set_prop_u32(child, "certificate-security-mode", 1);
@@ -3237,7 +3641,7 @@ static void t8030_init(MachineState* machine)
     apple_dt_set_prop_u64(child, "unique-chip-id", t8030->ecid);
 
     // Update the display parameters
-    apple_dt_set_prop_u32(child, "display-scale", 2);
+    apple_dt_set_prop_u32(child, "display-scale", t8030->soc->display_scale);
 
     child = apple_dt_get_node(t8030->device_tree, "product");
     apple_dt_set_prop_u64(child, "display-corner-radius", 0x100000027);
@@ -3246,7 +3650,7 @@ static void t8030_init(MachineState* machine)
     apple_dt_set_prop_str(child, "graphics-featureset-fallbacks", "");
     apple_dt_set_prop_str(child, "artwork-display-gamut", "sRGB");
     // TODO: PMP
-    apple_dt_set_prop_str(t8030->device_tree, "target-type", "n104sim");
+    apple_dt_set_prop_str(t8030->device_tree, "target-type", t8030->soc->target_type);
 
     t8030_cpu_setup(t8030);
     t8030_create_aic(t8030);
@@ -3255,85 +3659,10 @@ static void t8030_init(MachineState* machine)
 
     t8030_pmgr_setup(t8030);
     t8030_amcc_setup(t8030);
-    t8030_create_gpio(t8030, "gpio");
-    t8030_create_gpio(t8030, "smc-gpio");
-    t8030_create_gpio(t8030, "nub-gpio");
-    t8030_create_gpio(t8030, "aop-gpio");
-    t8030_create_i2c(t8030, "i2c0");
-    t8030_create_i2c(t8030, "i2c1");
-    t8030_create_i2c(t8030, "i2c2");
-    t8030_create_i2c(t8030, "i2c3");
-    t8030_create_i2c(t8030, "smc-i2c0");
-    t8030_create_i2c(t8030, "smc-i2c1");
-    t8030_create_dart(t8030, "dart-usb", false);
-    t8030_create_dart(t8030, "dart-sio", false);
-    t8030_create_dart(t8030, "dart-disp0", false);
-    t8030_create_dart(t8030, "dart-sep", false);
-    t8030_create_dart(t8030, "dart-apcie2", true);
-    t8030_create_dart(t8030, "dart-apcie3", true);
-    t8030_create_dart(t8030, "dart-aop", false);
-    t8030_create_dart(t8030, "dart-rsm", false);
-    t8030_create_dart(t8030, "dart-scaler", false);
-    t8030_create_pcie(t8030);
-    t8030_create_ans(t8030);
-    t8030_create_usb(t8030);
-    t8030_create_wdt(t8030);
-    t8030_create_aes(t8030);
-    t8030_create_spmi(t8030, "spmi0");
-    t8030_create_spmi(t8030, "spmi1");
-    t8030_create_spmi(t8030, "spmi2");
-    t8030_create_pmu(t8030, "spmi0", "spmi-pmu");
-    t8030_create_smc(t8030);
-#ifdef ENABLE_BASEBAND
-    t8030_create_baseband_spmi(t8030, "spmi1", "baseband-spmi");
-    t8030_create_baseband(t8030);
-#endif
-    t8030_create_sio(t8030);
-    t8030_create_spi0(t8030);
-    t8030_create_spi(t8030, 1);
-    t8030_create_spi(t8030, 3);
-
-    if (t8030->sep_rom_filename && t8030->sep_fw_filename) { t8030_create_sep(t8030); }
+    if (t8030->soc->gen == APPLE_SOC_T8101) { t8101_create_devices(t8030); }
     else {
-#ifdef ENABLE_DATA_ENCRYPTION
-        error_setg(&error_fatal, "Simulated SEP cannot be used with data "
-                                 "encryption at the moment.");
-        return;
-#else
-        t8030_create_sep_sim(t8030);
-#endif
+        t8030_create_devices(t8030);
     }
-
-    t8030_create_roswell(t8030);
-    t8030_create_lm_backlight(t8030);
-    t8030_create_display_pmu(t8030);
-    t8030_create_display(t8030);
-    t8030_create_mt_spi(t8030);
-    t8030_create_aop(t8030);
-    if (t8030->gpu) { t8030_create_gpu(t8030); }
-    t8030_create_mca(t8030);
-    t8030_create_speaker_top(t8030);
-    t8030_create_speaker_bottom(t8030);
-    t8030_create_buttons(t8030);
-    t8030_create_mipi_dsim(t8030);
-    t8030_create_scaler(t8030);
-    t8030_create_accbuck(t8030);
-    t8030_create_misc(t8030);
-
-    t8030_create_tempsensor(t8030, "tempsensor0", false);
-    t8030_create_tempsensor(t8030, "tempsensor1", false);
-    t8030_create_tempsensor(t8030, "tempsensor2", false);
-    t8030_create_tempsensor(t8030, "tempsensor3", false);
-    t8030_create_tempsensor(t8030, "tempsensor4", false);
-    t8030_create_tempsensor(t8030, "tempsensor5", false);
-    t8030_create_tempsensor(t8030, "mtrtempsensor6", true);
-    t8030_create_tempsensor(t8030, "mtrtempsensor7", true);
-    t8030_create_tempsensor(t8030, "mtrtempsensor8", true);
-    t8030_create_tempsensor(t8030, "mtrtempsensor11", false);
-    t8030_create_tempsensor(t8030, "mtrtempsensor13", false);
-    t8030_create_mtr_tempsensor(t8030, "mtrtempsensor14");
-    t8030_create_mtr_tempsensor(t8030, "mtrtempsensor15");
-    t8030_create_mic_temp_sensor2(t8030);
 
     t8030->init_done_notifier.notify = t8030_init_done;
     qemu_add_machine_init_done_notifier(&t8030->init_done_notifier);
@@ -3400,20 +3729,22 @@ PROP_GETTER_SETTER(bool, enable_pac);
 PROP_GETTER_SETTER(bool, patch_check);
 PROP_GETTER_SETTER(bool, gpu);
 
-static void t8030_class_init(ObjectClass* klass, const void* data)
+static void apple_soc_machine_class_init(ObjectClass* klass, const AppleSoCConfig* soc)
 {
-    MachineClass*   mc = MACHINE_CLASS(klass);
-    ObjectProperty* oprop;
+    MachineClass*           mc = MACHINE_CLASS(klass);
+    AppleT8030MachineClass* ac = (AppleT8030MachineClass*)klass;
+    ObjectProperty*         oprop;
 
-    mc->desc              = "Apple T8030 SoC (iPhone 11)";
+    ac->soc               = soc;
+    mc->desc              = soc->desc;
     mc->init              = t8030_init;
     mc->reset             = t8030_reset;
     mc->max_cpus          = A13_MAX_CPU + 1;
-    mc->default_cpu_type  = TYPE_APPLE_A13;
+    mc->default_cpu_type  = soc->cpu_type;
     mc->minimum_page_bits = 14;
     mc->default_ram_size  = 4 * GiB;
     mc->fixup_ram_size    = t8030_fixup_ram_size;
-    mc->default_ram_id    = "t8030.ram";
+    mc->default_ram_id    = soc->gen == APPLE_SOC_T8030 ? "t8030.ram" : "t8101.ram";
 
     object_class_property_add_str(klass, "trustcache", t8030_get_trustcache_filename, t8030_set_trustcache_filename);
     object_class_property_set_description(klass, "trustcache", "TrustCache");
@@ -3463,14 +3794,14 @@ static void t8030_class_init(ObjectClass* klass, const void* data)
     object_class_property_set_description(klass, "mlb", "MLB Serial Number");
     oprop = object_class_property_add_str(klass, "regulatory-model", t8030_get_regulatory_model,
                                           t8030_set_regulatory_model);
-    object_property_set_default_str(oprop, "INFERN8030");
+    object_property_set_default_str(oprop, soc->regulatory_model);
     object_class_property_set_description(klass, "regulatory-model", "Regulatory Model Number");
     oprop = object_class_property_add(klass, "disp-width", "uint32", t8030_get_disp_width, t8030_set_disp_width, NULL,
                                       NULL);
-    object_property_set_default_uint(oprop, 828);
+    object_property_set_default_uint(oprop, soc->disp_width);
     oprop = object_class_property_add(klass, "disp-height", "uint32", t8030_get_disp_height, t8030_set_disp_height,
                                       NULL, NULL);
-    object_property_set_default_uint(oprop, 1792);
+    object_property_set_default_uint(oprop, soc->disp_height);
     object_class_property_add_bool(klass, "enable-pac", t8030_get_enable_pac, t8030_set_enable_pac);
     object_class_property_set_description(klass, "enable-pac",
                                           "Enable PAC with virtualisation (supports arm64e binaries only).");
@@ -3480,14 +3811,35 @@ static void t8030_class_init(ObjectClass* klass, const void* data)
                                           "(experimental, docs/GPU-EMULATION-SCOPE.md). Default off.");
 }
 
-static const TypeInfo t8030_info = {
-    .name   = TYPE_APPLE_T8030,
-    .parent = TYPE_MACHINE,
-    OBJECT_TYPE_INSTANCE(AppleT8030MachineState),
-    .class_size = sizeof(AppleT8030MachineClass),
-    .class_init = t8030_class_init,
+static void t8030_class_init(ObjectClass* klass, const void* data) { apple_soc_machine_class_init(klass, &t8030_soc); }
+
+/*
+ * t8101 shares the whole implementation with its own AppleSoCConfig
+ * (T8101-SCOPE.md 1.1). Both machines are children of an abstract type, so
+ * each class carries its own property defaults.
+ */
+static void t8101_class_init(ObjectClass* klass, const void* data) { apple_soc_machine_class_init(klass, &t8101_soc); }
+
+static const TypeInfo t8030_types_info[] = {
+    {
+        .name     = TYPE_APPLE_SOC_MACHINE,
+        .parent   = TYPE_MACHINE,
+        .abstract = true,
+        OBJECT_TYPE_INSTANCE(AppleT8030MachineState),
+        .class_size = sizeof(AppleT8030MachineClass),
+    },
+    {
+        .name       = TYPE_APPLE_T8030,
+        .parent     = TYPE_APPLE_SOC_MACHINE,
+        .class_init = t8030_class_init,
+    },
+    {
+        .name       = TYPE_APPLE_T8101,
+        .parent     = TYPE_APPLE_SOC_MACHINE,
+        .class_init = t8101_class_init,
+    },
 };
 
-static void t8030_types(void) { type_register_static(&t8030_info); }
+static void t8030_types(void) { type_register_static_array(t8030_types_info, ARRAY_SIZE(t8030_types_info)); }
 
 type_init(t8030_types)

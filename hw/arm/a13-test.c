@@ -11,6 +11,9 @@
  *
  *   qemu-system-aarch64 -M a13-test -display none -kernel test.bin
  *
+ * `core=` picks the core: lightning (default) or thunder (A13, as t8030),
+ * firestorm or icestorm (A14, as t8101).
+ *
  * The raw image is copied to A13_TEST_RAM_BASE and the core starts there at
  * EL1 (AArch64, MMU off), the way t8030 hands over to a kernel or SPTM.
  *
@@ -72,6 +75,7 @@ struct A13TestMachineState
     gchar*          image;
     gsize           image_size;
     uint64_t        detail;
+    char*           core;
 };
 
 static uint64_t a13_test_ctl_read(void* opaque, hwaddr addr, unsigned size)
@@ -136,7 +140,29 @@ static void a13_test_init(MachineState* machine)
      * the per-cluster registers (CTRR, IPI). */
     object_initialize_child(OBJECT(machine), "cluster0", &s->cluster, TYPE_APPLE_A13_CLUSTER);
     qdev_prop_set_uint32(DEVICE(&s->cluster), "cluster-id", 0);
-    s->cpu = apple_a13_create("cpu0", 0, 0, 0, 'P');
+    {
+        static const struct
+        {
+            const char* name;
+            const char* type;
+            char        cluster_type;
+        } cores[] = {
+            {"lightning", TYPE_APPLE_A13, 'P'},
+            {"thunder", TYPE_APPLE_A13, 'E'},
+            {"firestorm", TYPE_APPLE_A14, 'P'},
+            {"icestorm", TYPE_APPLE_A14, 'E'},
+        };
+        size_t i;
+
+        for (i = 0; i < ARRAY_SIZE(cores); ++i) {
+            if (g_str_equal(s->core != NULL ? s->core : "lightning", cores[i].name)) { break; }
+        }
+        if (i == ARRAY_SIZE(cores)) {
+            error_setg(&error_fatal, "a13-test: unknown core `%s`", s->core);
+            return;
+        }
+        s->cpu = apple_a13_create_type(cores[i].type, "cpu0", 0, 0, 0, cores[i].cluster_type);
+    }
     object_property_add_child(OBJECT(&s->cluster), "cpu0", OBJECT(s->cpu));
     qdev_realize(DEVICE(s->cpu), NULL, &error_fatal);
     qdev_realize(DEVICE(&s->cluster), NULL, &error_fatal);
@@ -158,9 +184,21 @@ static void a13_test_reset(MachineState* machine, ResetType type)
     arm_set_cpu_on(s->cpu->parent_obj.mp_affinity, A13_TEST_RAM_BASE, 0, 1, true);
 }
 
+static char* a13_test_get_core(Object* obj, Error** errp) { return g_strdup(A13_TEST_MACHINE(obj)->core); }
+
+static void a13_test_set_core(Object* obj, const char* value, Error** errp)
+{
+    A13TestMachineState* s = A13_TEST_MACHINE(obj);
+    g_free(s->core);
+    s->core = g_strdup(value);
+}
+
 static void a13_test_class_init(ObjectClass* klass, const void* data)
 {
     MachineClass* mc = MACHINE_CLASS(klass);
+
+    object_class_property_add_str(klass, "core", a13_test_get_core, a13_test_set_core);
+    object_class_property_set_description(klass, "core", "lightning (default), thunder, firestorm or icestorm");
 
     mc->desc              = "Apple A13 CPU test bench (bare-metal CPU-model tests, no firmware)";
     mc->init              = a13_test_init;

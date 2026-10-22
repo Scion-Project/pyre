@@ -72,6 +72,7 @@ REG32(DART_PARAMS1, 0x0)
 REG32(DART_PARAMS2, 0x4)
     REG_FIELD(DART_PARAMS2, BYPASS_SUPPORT, 0, 1)
     REG_FIELD(DART_PARAMS2, LOCK_SUPPORT, 1, 1)
+    REG_FIELD(DART_PARAMS2, APF_SLICES, 8, 8)
 // 0x8..0x1C = ??
 REG32(DART_TLB_OP, 0x20)
     REG_FIELD(DART_TLB_OP, OP, 0, 2)
@@ -191,6 +192,8 @@ typedef struct
     AppleDARTState* dart;
     uint32_t        id;
     dart_instance_t type;
+    /* DART with an address filter (t8101 layout): APF slices it reports */
+    uint32_t        apf_slices;
 } AppleDARTInstance;
 
 typedef struct
@@ -754,6 +757,16 @@ static void apple_dart_reset_enter(Object* obj, ResetType type)
 
                 mapper->regs.params1 = params1;
                 mapper->regs.params2 = REG_FIELD_DP32(0, DART_PARAMS2, BYPASS_SUPPORT, 1);
+                if (mapper->common.apf_slices != 0) {
+                    /*
+                     * Filtered DART (t8101): the kernel compares the DART's
+                     * lock state (-1 without lock support) with the
+                     * filter's, which reads unlocked.
+                     */
+                    mapper->regs.params2 =
+                        REG_FIELD_DP32(mapper->regs.params2, DART_PARAMS2, APF_SLICES, mapper->common.apf_slices);
+                    mapper->regs.params2 = REG_FIELD_DP32(mapper->regs.params2, DART_PARAMS2, LOCK_SUPPORT, 1);
+                }
                 break;
             }
             default: break;
@@ -837,6 +850,7 @@ AppleDARTState* apple_dart_from_node(AppleDTNode* node)
     AppleDTProp*    prop;
     uint64_t*       reg;
     uint32_t*       instance_data;
+    uint32_t        num_entries;
     int             i;
 
     dev  = qdev_new(TYPE_APPLE_DART);
@@ -883,10 +897,12 @@ AppleDARTState* apple_dart_from_node(AppleDTNode* node)
         else {
             instance_data = (uint32_t*)"TRADDART\0\0\0";
         }
+        num_entries = 0;
     }
     else {
         assert_cmpuint(prop->len % 12, ==, 0);
         instance_data = (uint32_t*)prop->data;
+        num_entries   = prop->len / 12;
     }
 
     prop = apple_dt_get_prop(node, "reg");
@@ -898,8 +914,27 @@ AppleDARTState* apple_dart_from_node(AppleDTNode* node)
     dart->instances     = g_new(AppleDARTInstance*, dart->num_instances);
     for (i = 0; i < dart->num_instances; i++) {
         AppleDARTInstance* instance;
+        uint32_t           type;
+        bool               filtered = false;
 
-        switch (ldl_le_p(instance_data)) {
+        /*
+         * t8101 (A14) device trees list fewer instance entries than reg
+         * ranges: a `DAPF`-typed entry is then a DART that has an address
+         * filter, and the filters' ranges follow the listed ones. When the
+         * counts match (t8030 and older), every entry is its own instance.
+         */
+        if (num_entries != 0 && num_entries < dart->num_instances) {
+            type = (uint32_t)i < num_entries ? ldl_le_p(instance_data) : 'DAPF';
+            if ((uint32_t)i < num_entries && type == 'DAPF') {
+                type     = 'DART';
+                filtered = true;
+            }
+        }
+        else {
+            type = ldl_le_p(instance_data);
+        }
+
+        switch (type) {
             case 'DART': {
                 AppleDARTMapperInstance* mapper = g_new0(AppleDARTMapperInstance, 1);
                 instance                        = &mapper->common;
@@ -938,11 +973,21 @@ AppleDARTState* apple_dart_from_node(AppleDTNode* node)
         }
         instance->id       = i;
         instance->dart     = dart;
+        if (filtered) {
+            /*
+             * The kernel checks the slices it is told to program
+             * (filter-data-instance-<n>, 24 bytes each) against PARAMS2.
+             */
+            char*        fname = g_strdup_printf("filter-data-instance-%d", i);
+            AppleDTProp* fprop = apple_dt_get_prop(node, fname);
+            g_free(fname);
+            instance->apf_slices = MAX(fprop != NULL ? fprop->len / 24 : 0, 16);
+        }
         dart->instances[i] = instance;
         sysbus_init_mmio(sbd, &instance->iomem);
         DPRINTF("%s: DART %s instance %d: %s\n", __func__, instance->dart->parent_obj.parent_obj.id, i,
                 dart_instance_name[instance->type]);
-        instance_data += 3;
+        if (num_entries == 0 || (uint32_t)i + 1 < num_entries) { instance_data += 3; }
     }
 
     sysbus_init_irq(sbd, &dart->irq);
