@@ -397,6 +397,19 @@ static inline bool use_goto_tb(DisasContext* s, uint64_t dest)
     return translator_use_goto_tb(&s->base, dest);
 }
 
+/*
+ * An indirect branch (or a direct one off this page) to the pc in cpu_pc,
+ * with the jump-cache hit inline. The TB state here is this TB's, except
+ * where BTI makes BTYPE (part of the state) depend on the branch.
+ */
+static void gen_a64_lookup_and_goto_ptr(DisasContext* s)
+{
+    if (dc_isar_feature(aa64_bti, s)) { gen_lookup_and_goto_ptr(); }
+    else {
+        translator_lookup_and_goto_ptr(&s->base, cpu_pc, gen_helper_arm_lookup_tb_ptr);
+    }
+}
+
 static void gen_goto_tb(DisasContext* s, int n, int64_t diff)
 {
     if (use_goto_tb(s, s->pc_curr + diff)) {
@@ -423,7 +436,7 @@ static void gen_goto_tb(DisasContext* s, int n, int64_t diff)
         gen_a64_update_pc(s, diff);
         if (s->ss_active) { gen_step_complete_exception(s); }
         else {
-            gen_lookup_and_goto_ptr();
+            gen_a64_lookup_and_goto_ptr(s);
             s->base.is_jmp = DISAS_NORETURN;
         }
     }
@@ -9642,9 +9655,11 @@ static void aarch64_tr_tb_stop(DisasContextBase* dcbase, CPUState* cpu)
                 /* fall through */
             case DISAS_EXIT: tcg_gen_exit_tb(NULL, 0); break;
             case DISAS_UPDATE_NOCHAIN:
+                /* the TB state may have changed: the helper recomputes it */
                 gen_a64_update_pc(dc, 4);
-                /* fall through */
-            case DISAS_JUMP    : gen_lookup_and_goto_ptr(); break;
+                gen_lookup_and_goto_ptr();
+                break;
+            case DISAS_JUMP: gen_a64_lookup_and_goto_ptr(dc); break;
             case DISAS_NORETURN:
             case DISAS_SWI     : break;
             case DISAS_WFE:

@@ -89,6 +89,7 @@ bool tcg_native_fp_explicit;
 bool tcg_native_fp_fault;
 bool tcg_native_fp_selftest = true;
 bool tcg_native_fp_inline   = true;
+bool tcg_inline_lookup = true;
 bool tcg_native_int;
 bool tcg_native_int_explicit;
 bool tcg_native_int_ldst = true;
@@ -296,6 +297,8 @@ static void tcg_set_native_fp_selftest(Object* obj, bool value, Error** errp) { 
 static bool tcg_get_native_fp_inline(Object* obj, Error** errp) { return tcg_native_fp_inline; }
 static void tcg_set_native_fp_inline(Object* obj, bool value, Error** errp) { tcg_native_fp_inline = value; }
 
+static bool tcg_get_inline_lookup(Object* obj, Error** errp) { return tcg_inline_lookup; }
+static void tcg_set_inline_lookup(Object* obj, bool value, Error** errp) { tcg_inline_lookup = value; }
 static bool tcg_get_native_int(Object* obj, Error** errp) { return tcg_native_int; }
 static void tcg_set_native_int(Object* obj, bool value, Error** errp)
 {
@@ -357,6 +360,10 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
     object_class_property_add_bool(oc, "x-native-fp-inline", tcg_get_native_fp_inline, tcg_set_native_fp_inline);
     object_class_property_set_description(oc, "x-native-fp-inline",
                                           "Diagnostic: set off to keep native-fp in helpers (no inline host FP)");
+
+    object_class_property_add_bool(oc, "x-inline-lookup", tcg_get_inline_lookup, tcg_set_inline_lookup);
+    object_class_property_set_description(oc, "x-inline-lookup",
+                                          "Diagnostic: set off to do every indirect-branch TB lookup in the helper");
 
     object_class_property_add_bool(oc, "native-int", tcg_get_native_int, tcg_set_native_int);
     object_class_property_set_description(oc, "native-int",

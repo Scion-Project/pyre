@@ -94,6 +94,8 @@ void tcg_gen_lookup_and_goto_ptr(void);
  *              inline and then calls tcg_lookup_tb_ptr())
  */
 void tcg_gen_lookup_and_goto_ptr_via(void (*gen_lookup)(TCGv_ptr ret, TCGv_env env));
+/* Jump to host code at @ptr (a TB's tc.ptr, or tcg_code_gen_epilogue): ends the TB. */
+void tcg_gen_goto_ptr(TCGv_ptr ptr);
 
 /* 32 bit ops */
 
