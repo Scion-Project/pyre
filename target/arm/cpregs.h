@@ -923,6 +923,16 @@ struct ARMCPRegInfo
     ptrdiff_t bank_fieldoffsets[2];
 
     /*
+     * Apple GXF: if non-zero, the CPUARMState field that holds this register
+     * for accesses from guarded execution (GL), while fieldoffset holds it
+     * otherwise. Whether execution is guarded is part of the TB flags (via
+     * the MMU index), so the A64 translator picks the field at translation
+     * time: without readfn/writefn the access is a plain load or store in
+     * either state, like any other field register.
+     */
+    ptrdiff_t gxf_fieldoffset;
+
+    /*
      * Function for making any access checks for this register in addition to
      * those specified by the 'access' permissions bits. If NULL, no extra
      * checks required. The access check is performed at runtime, not at
