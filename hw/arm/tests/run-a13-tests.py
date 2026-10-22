@@ -31,10 +31,13 @@ FAIL_BASE = 0x46000000
 
 # (name, source, extra assembler flags, expectation)
 # expectation "pass", or ("undef", check_number): FAIL raised by an exception
-# vector at that check with ESR.EC == 0 (unknown instruction / UNDEF).
+# vector at that check with ESR.EC == 0 (unknown instruction / UNDEF), or
+# ("mismatch", check_number): FAIL with a value mismatch (cause 0xff) there.
 TESTS = [
     ("gxf_sptm_regs", "gxf_sptm_regs_test.S", [], "pass"),
     ("gxf_sptm_regs (negative control)", "gxf_sptm_regs_test.S", ["-DNEGATIVE_CONTROL"], ("undef", 19)),
+    ("gxf_banked_el1", "gxf_banked_el1_test.S", [], "pass"),
+    ("gxf_banked_el1 (negative control)", "gxf_banked_el1_test.S", ["-DNEGATIVE_CONTROL"], ("mismatch", 31)),
 ]
 
 
@@ -96,7 +99,7 @@ def judge(expect, code, out):
         if code == 0 and "a13-test: PASS" in out:
             return True, "PASS"
         return False, f"exit {code}"
-    _, check = expect
+    kind, check = expect
     for line in out.splitlines():
         m = re.search(r"a13-test: FAIL status=0x([0-9a-f]+) detail=0x([0-9a-f]+)", line)
         if not m:
@@ -106,6 +109,10 @@ def judge(expect, code, out):
         cause = status & 0xff
         got_check = (status >> 8) & 0xffff
         ec = (detail >> 26) & 0x3f
+        if kind == "mismatch":
+            if code == 1 and status & ~0xffffff == FAIL_BASE and cause == 0xff and got_check == check:
+                return True, f"failed as expected (check {got_check}, value mismatch, read 0x{detail:x})"
+            return False, f"wrong failure: check {got_check}, cause 0x{cause:x}"
         if code == 1 and status & ~0xffffff == FAIL_BASE and cause <= 0xf and got_check == check and ec == 0:
             return True, f"failed as expected (check {got_check}, vector {cause}, ESR 0x{detail:x})"
         return False, f"wrong failure: check {got_check}, cause 0x{cause:x}, ESR.EC 0x{ec:x}"
