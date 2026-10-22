@@ -597,6 +597,43 @@ static void ck_kp_sep_mgr_patches(CKPatcherRange* range)
     }
 }
 
+// IOMFB's UPPipe_H11P::init() skips the PMP realtime-bandwidth setup on a
+// simulator.  It learns that from the "iomfb_system_type" boot-arg (ignored
+// unless PE_i_can_has_debugger()) or, failing that, from a helper that does
+//   IOService::getMatchingServices({"name": "device-tree"})->getNextObject()
+//       ->copyProperty("target-type") ends in "sim"
+// getMatchingServices() only returns services that have *finished matching*,
+// and it does not actually filter on "name": it hands back the first matched
+// service in the registry.  That is the platform expert device only once
+// IOPlatformExpertDevice has been marked matched; ~3% of boots the display
+// driver starts before that, the helper gets some unrelated nub that has no
+// "target-type", the answer is "not a simulator", and IOMFB falls into the
+// "Legacy PMP RT Bandwidth API" path: "bandwidth values not found", "DRIVER
+// DIDN'T LOAD" and a NULL dereference in its error path (kernel data abort,
+// pc ...6d4 in 14.8).  Our device tree says "n104sim", so give IOMFB that
+// answer without the racy registry lookup: replace the helper call with
+// `mov w0, #1`.
+static void ck_kp_iomfb_patches(CKPatcherRange* range)
+{
+    static const uint8_t pattern[] = {
+        0x60, 0x00, 0x00, 0x34,    // cbz w0, #0xc  (boot-arg not given -> helper)
+        0xE8, 0x03, 0x40, 0xB9,    // ldr w8, [sp, #?]
+        0x04, 0x00, 0x00, 0x14,    // b #0x10
+        0x00, 0x00, 0x00, 0x94,    // bl is_simulator_target_type
+        0x60, 0x00, 0x00, 0x34,    // cbz w0, #0xc
+        0x48, 0x00, 0x80, 0x52,    // mov w8, #2
+        0x68, 0x02, 0x00, 0xB9,    // str w8, [x19, #?]  (system type = 2)
+    };
+    static const uint8_t mask[] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x03, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0xFC,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x03, 0xC0, 0xFF,
+    };
+    QEMU_BUILD_BUG_ON(sizeof(pattern) != sizeof(mask));
+    static const uint8_t repl[] = {0x20, 0x00, 0x80, 0x52};    // mov w0, #1
+    ck_patcher_find_replace(range, "IOMFB: always detect the simulator system type", pattern, mask, sizeof(pattern),
+                            sizeof(uint32_t), repl, NULL, 12, sizeof(repl));
+}
+
 static bool ck_kp_img4_callback(void* ctx, uint8_t* buffer)
 {
     uint8_t* start = ck_patcher_find_prev_insn(buffer, 200, PACIBSP, 0xFFFFFFFF, 0);
@@ -672,6 +709,7 @@ void ck_patch_kernel(MachoHeader64* hdr)
     g_autofree CKPatcherRange* amfi_text;
     g_autofree CKPatcherRange* sep_mgr_text;
     g_autofree CKPatcherRange* img4_text;
+    g_autofree CKPatcherRange* iomfb_text;
     g_autofree CKPatcherRange* kernel_text;
     g_autofree CKPatcherRange* kernel_const;
     g_autofree CKPatcherRange* kernel_ppltext;
@@ -691,6 +729,9 @@ void ck_patch_kernel(MachoHeader64* hdr)
 
     img4_text = ck_kp_find_image_text(hdr, "com.apple.security.AppleImage4");
     ck_kp_img4_patches(img4_text);
+
+    iomfb_text = ck_kp_find_image_text(hdr, "com.apple.driver.AppleMobileDispH12P");
+    if (iomfb_text != NULL) { ck_kp_iomfb_patches(iomfb_text); }
 
     kernel_text = ck_kp_get_kernel_section(hdr, "__TEXT_EXEC", "__text");
     ck_kp_mac_mount_patch(kernel_text);
