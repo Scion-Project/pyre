@@ -169,8 +169,10 @@ void arm_native_fp_init(void)
     }
     arm_native_fp_on     = true;
     arm_native_fp_inline = tcg_native_fp_inline;
-    info_report("native-fp: on (host self-test passed, %u cases)%s", ncases,
-                arm_native_fp_inline ? "" : ", helpers only (x-native-fp-inline=off)");
+    if (tcg_native_fp_explicit) {
+        info_report("native-fp: on (host self-test passed, %u cases)%s", ncases,
+                    arm_native_fp_inline ? "" : ", helpers only (x-native-fp-inline=off)");
+    }
 }
 
 #else /* !ARM_NATIVE_FP_HOST */
@@ -181,7 +183,9 @@ void arm_native_fp_init(void)
 
     if (done || !tcg_native_fp) { return; }
     done = true;
-    info_report("native-fp: not available on this host (needs an AArch64 host); guest FP stays on softfloat");
+    if (tcg_native_fp_explicit) {
+        info_report("native-fp: not available on this host (needs an AArch64 host); guest FP stays on softfloat");
+    }
 }
 
 const char* arm_native_fp_selftest(unsigned* ncases) { return "not an AArch64 host"; }

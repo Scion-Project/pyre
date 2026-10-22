@@ -56,7 +56,10 @@ NATIVE_ON_MSG = "native-fp: on (host self-test passed" if IS_AARCH64_HOST else "
 FP_TESTS = []
 for _variant, _flags in (("", []), (", sticky FPSR", ["-DSTICKY"])):
     FP_TESTS += [
-        (f"fp_native_check{_variant}, native-fp=off", "fp_native_check.S", _flags, "pass", {}),
+        (f"fp_native_check{_variant}, native-fp=off", "fp_native_check.S", _flags, "pass",
+         {"accel": "native-fp=off"}),
+        (f"fp_native_check{_variant}, default (native-fp on where available)", "fp_native_check.S", _flags,
+         "pass", {}),
         (f"fp_native_check{_variant}, native-fp=on", "fp_native_check.S", _flags, "pass",
          {"accel": "native-fp=on", "need": NATIVE_ON_MSG}),
         (f"fp_native_check{_variant}, native-fp=on, helpers only (x-native-fp-inline=off)", "fp_native_check.S",
