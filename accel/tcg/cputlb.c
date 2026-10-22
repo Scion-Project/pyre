@@ -117,6 +117,10 @@ static inline uintptr_t tlb_index(CPUState* cpu, uintptr_t mmu_idx, vaddr addr)
 static inline CPUTLBEntry* tlb_entry(CPUState* cpu, uintptr_t mmu_idx, vaddr addr)
 { return &cpu_tlb_fast(cpu, mmu_idx)->table[tlb_index(cpu, mmu_idx, addr)]; }
 
+/* The same, for a TLB given by its fast part (live or kept aside). */
+static inline CPUTLBEntry* tlbd_entry(CPUTLBDescFast* fast, vaddr addr)
+{ return &fast->table[(addr >> TARGET_PAGE_BITS) & (fast->mask >> CPU_TLB_ENTRY_BITS)]; }
+
 static void tlb_window_reset(CPUTLBDesc* desc, int64_t ns, size_t max_entries)
 {
     desc->window_begin_ns    = ns;
@@ -207,7 +211,7 @@ static void tb_jmp_cache_clear_asid_tagged(CPUState* cpu)
  * high), since otherwise we are likely to have a significant amount of
  * conflict misses.
  */
-static void tlb_mmu_resize_locked(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_t now)
+static size_t tlb_mmu_resize_size(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_t now)
 {
     size_t  old_size = tlb_n_entries(fast);
     size_t  rate;
@@ -240,10 +244,15 @@ static void tlb_mmu_resize_locked(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_
         new_size = MAX(ceil, 1 << CPU_TLB_DYN_MIN_BITS);
     }
 
-    if (new_size == old_size) {
-        if (window_expired) { tlb_window_reset(desc, now, desc->n_used_entries); }
-        return;
-    }
+    if (new_size == old_size && window_expired) { tlb_window_reset(desc, now, desc->n_used_entries); }
+    return new_size;
+}
+
+static void tlb_mmu_resize_locked(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_t now)
+{
+    size_t new_size = tlb_mmu_resize_size(desc, fast, now);
+
+    if (new_size == tlb_n_entries(fast)) { return; }
 
     g_free(fast->table);
     g_free(desc->fulltlb);
@@ -307,6 +316,13 @@ static void tlb_mmu_init(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_t now)
     tlb_mmu_flush_locked(desc, fast);
 }
 
+/* TLB contexts, see tlb_switch_asid_ctx(). Called with tlb_c.lock held. */
+static void tlb_ctx_drop_locked(CPUState* cpu, MMUIdxMap idxmap);
+static void tlb_ctx_flush_page_locked(CPUState* cpu, int midx, vaddr page);
+static void tlb_ctx_flush_range_locked(CPUState* cpu, int midx, vaddr addr, vaddr len, unsigned bits);
+static void tlb_ctx_reset_dirty_locked(CPUState* cpu, uintptr_t start, uintptr_t length);
+static void tlb_ctx_destroy(CPUState* cpu);
+
 static inline void tlb_n_used_entries_inc(CPUState* cpu, uintptr_t mmu_idx)
 { cpu->neg.tlb.d[mmu_idx].n_used_entries++; }
 
@@ -331,6 +347,7 @@ void tlb_destroy(CPUState* cpu)
     int i;
 
     qemu_spin_destroy(&cpu->neg.tlb.c.lock);
+    tlb_ctx_destroy(cpu);
     for (i = 0; i < NB_MMU_MODES; i++) {
         CPUTLBDesc*     desc = &cpu->neg.tlb.d[i];
         CPUTLBDescFast* fast = cpu_tlb_fast(cpu, i);
@@ -407,6 +424,7 @@ static void tlb_flush_by_mmuidx_async_work(CPUState* cpu, run_on_cpu_data data)
         int mmu_idx = ctz32(work);
         tlb_flush_one_mmuidx_locked(cpu, mmu_idx, now);
     }
+    tlb_ctx_drop_locked(cpu, asked);
 
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
@@ -489,13 +507,16 @@ static inline bool tlb_flush_entry_locked(CPUTLBEntry* tlb_entry, vaddr page)
  * table only (an entry evicted to the victim table is uncounted, one swapped
  * back in is counted again), so clearing victim entries leaves it alone.
  */
+static void tlbd_flush_vtlb_page_mask_locked(CPUTLBDesc* d, vaddr page, vaddr mask)
+{
+    for (int k = 0; k < CPU_VTLB_SIZE; k++) { tlb_flush_entry_mask_locked(&d->vtable[k], page, mask); }
+}
+
+/* Called with tlb_c.lock held */
 static void tlb_flush_vtlb_page_mask_locked(CPUState* cpu, int mmu_idx, vaddr page, vaddr mask)
 {
-    CPUTLBDesc* d = &cpu->neg.tlb.d[mmu_idx];
-    int         k;
-
     assert_cpu_is_self(cpu);
-    for (k = 0; k < CPU_VTLB_SIZE; k++) { tlb_flush_entry_mask_locked(&d->vtable[k], page, mask); }
+    tlbd_flush_vtlb_page_mask_locked(&cpu->neg.tlb.d[mmu_idx], page, mask);
 }
 
 static inline void tlb_flush_vtlb_page_locked(CPUState* cpu, int mmu_idx, vaddr page)
@@ -543,20 +564,26 @@ void tlb_flush_asid_tagged_by_mmuidx(CPUState* cpu, MMUIdxMap idxmap)
     if (todo != 0) { tb_jmp_cache_clear_asid_tagged(cpu); }
 }
 
-static void tlb_flush_page_locked(CPUState* cpu, int midx, vaddr page)
+/* Flush @page from one TLB, live or kept aside. Called with tlb_c.lock held. */
+static void tlbd_flush_page_locked(CPUTLBDesc* d, CPUTLBDescFast* f, vaddr page)
 {
-    vaddr lp_addr = cpu->neg.tlb.d[midx].large_page_addr;
-    vaddr lp_mask = cpu->neg.tlb.d[midx].large_page_mask;
-
     /* Check if we need to flush due to large pages.  */
-    if ((page & lp_mask) == lp_addr) {
-        tlb_debug("forcing full flush midx %d (%016" VADDR_PRIx "/%016" VADDR_PRIx ")\n", midx, lp_addr, lp_mask);
-        tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
+    if ((page & d->large_page_mask) == d->large_page_addr) {
+        tlb_debug("forcing full flush (%016" VADDR_PRIx "/%016" VADDR_PRIx ")\n", d->large_page_addr,
+                  d->large_page_mask);
+        tlb_mmu_resize_locked(d, f, get_clock_realtime());
+        tlb_mmu_flush_locked(d, f);
     }
     else {
-        if (tlb_flush_entry_locked(tlb_entry(cpu, midx, page), page)) { tlb_n_used_entries_dec(cpu, midx); }
-        tlb_flush_vtlb_page_locked(cpu, midx, page);
+        if (tlb_flush_entry_locked(tlbd_entry(f, page), page)) { d->n_used_entries--; }
+        tlbd_flush_vtlb_page_mask_locked(d, page, -1);
     }
+}
+
+static void tlb_flush_page_locked(CPUState* cpu, int midx, vaddr page)
+{
+    tlbd_flush_page_locked(&cpu->neg.tlb.d[midx], cpu_tlb_fast(cpu, midx), page);
+    tlb_ctx_flush_page_locked(cpu, midx, page);
 }
 
 /**
@@ -700,11 +727,10 @@ void tlb_flush_page_by_mmuidx_all_cpus_synced(CPUState* src_cpu, vaddr addr, MMU
 void tlb_flush_page_all_cpus_synced(CPUState* src, vaddr addr)
 { tlb_flush_page_by_mmuidx_all_cpus_synced(src, addr, ALL_MMUIDX_BITS); }
 
-static void tlb_flush_range_locked(CPUState* cpu, int midx, vaddr addr, vaddr len, unsigned bits)
+/* Flush a range from one TLB, live or kept aside. Called with tlb_c.lock held. */
+static void tlbd_flush_range_locked(CPUTLBDesc* d, CPUTLBDescFast* f, vaddr addr, vaddr len, unsigned bits)
 {
-    CPUTLBDesc*     d    = &cpu->neg.tlb.d[midx];
-    CPUTLBDescFast* f    = cpu_tlb_fast(cpu, midx);
-    vaddr           mask = MAKE_64BIT_MASK(0, bits);
+    vaddr mask = MAKE_64BIT_MASK(0, bits);
 
     /*
      * If @bits is smaller than the tlb size, there may be multiple entries
@@ -717,10 +743,11 @@ static void tlb_flush_range_locked(CPUState* cpu, int midx, vaddr addr, vaddr le
      * test all of the entries in the TLB than it will to flush it all.
      */
     if (mask < f->mask || len > f->mask) {
-        tlb_debug("forcing full flush midx %d ("
+        tlb_debug("forcing full flush ("
                   "%016" VADDR_PRIx "/%016" VADDR_PRIx "+%016" VADDR_PRIx ")\n",
-                  midx, addr, mask, len);
-        tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
+                  addr, mask, len);
+        tlb_mmu_resize_locked(d, f, get_clock_realtime());
+        tlb_mmu_flush_locked(d, f);
         return;
     }
 
@@ -730,20 +757,27 @@ static void tlb_flush_range_locked(CPUState* cpu, int midx, vaddr addr, vaddr le
      * we only need to test the end of the range.
      */
     if (((addr + len - 1) & d->large_page_mask) == d->large_page_addr) {
-        tlb_debug("forcing full flush midx %d ("
+        tlb_debug("forcing full flush ("
                   "%016" VADDR_PRIx "/%016" VADDR_PRIx ")\n",
-                  midx, d->large_page_addr, d->large_page_mask);
-        tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
+                  d->large_page_addr, d->large_page_mask);
+        tlb_mmu_resize_locked(d, f, get_clock_realtime());
+        tlb_mmu_flush_locked(d, f);
         return;
     }
 
     for (vaddr i = 0; i < len; i += TARGET_PAGE_SIZE) {
         vaddr        page  = addr + i;
-        CPUTLBEntry* entry = tlb_entry(cpu, midx, page);
+        CPUTLBEntry* entry = tlbd_entry(f, page);
 
-        if (tlb_flush_entry_mask_locked(entry, page, mask)) { tlb_n_used_entries_dec(cpu, midx); }
-        tlb_flush_vtlb_page_mask_locked(cpu, midx, page, mask);
+        if (tlb_flush_entry_mask_locked(entry, page, mask)) { d->n_used_entries--; }
+        tlbd_flush_vtlb_page_mask_locked(d, page, mask);
     }
+}
+
+static void tlb_flush_range_locked(CPUState* cpu, int midx, vaddr addr, vaddr len, unsigned bits)
+{
+    tlbd_flush_range_locked(&cpu->neg.tlb.d[midx], cpu_tlb_fast(cpu, midx), addr, len, bits);
+    tlb_ctx_flush_range_locked(cpu, midx, addr, len, bits);
 }
 
 typedef struct
@@ -1002,7 +1036,345 @@ void tlb_reset_dirty(CPUState* cpu, uintptr_t start, uintptr_t length)
             tlb_reset_dirty_range_locked(&desc->vfulltlb[i], &desc->vtable[i], start, length);
         }
     }
+    tlb_ctx_reset_dirty_locked(cpu, start, length);
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+
+/*
+ * TLB contexts: the TLBs of recently left address spaces.
+ *
+ * Without them, a guest that switches address space id (ASID) drops every
+ * ASID-tagged entry of the outgoing address space (tlb_flush_asid_tagged_*),
+ * and refills them one page-table walk at a time when it switches back. A
+ * kernel that enters and leaves a process often (KPTI's two ASIDs per process,
+ * every system call; XNU's user/kernel switches) pays that refill each time.
+ *
+ * tlb_switch_asid_ctx() instead keeps the outgoing TLBs aside in a slot,
+ * keyed by the target's description of the address space, and swaps the
+ * incoming address space's TLBs back in if a slot holds them.
+ *
+ * Correctness rests on one invariant: a slot holds exactly what the live
+ * TLB would hold had the guest stayed in that address space and executed no
+ * instruction. Fills only ever go to the live TLB; every other change to TLB
+ * contents is applied to the slots as well, at the same time and under the
+ * same lock:
+ *   - full flushes of an mmu index drop that index from every slot;
+ *   - page and range flushes (tlbd_flush_page_locked, tlbd_flush_range_locked)
+ *     are applied to each slot's copy of the index;
+ *   - dirty-tracking resets (TLB_NOTDIRTY for code and migration) scan the
+ *     slots too, so a write through a restored entry still traps.
+ * Slots are only read or written with tlb_c.lock held, and only the owning
+ * vCPU swaps them in or out. Since QEMU's TLB invalidations ignore the ASID
+ * (a TLBI by ASID or by VA+ASID invalidates all ASIDs), every entry a slot can
+ * bring back was filled under the slot's address space and has not been
+ * invalidated since, which is what an ASID-tagged hardware TLB may return.
+ *
+ * Invariant for remote flushes: an index held by any slot keeps its bit in
+ * tlb_c.dirty (we only save dirty indexes, never clear their bit on a switch,
+ * and a full flush that clears the bit also drops the index from the slots),
+ * so flush_all_helper() never skips a vCPU whose slots need the flush.
+ *
+ * The jump cache is not kept aside: a switch clears its ASID-tagged entries
+ * exactly as tlb_flush_asid_tagged_by_mmuidx() does.
+ */
+#define TLB_CTX_MAX_SLOTS TLB_ASID_CTX_MAX_SLOTS
+/* At most this many mmu indexes per switch, and per-index TLBs no bigger than this are copied. */
+#define TLB_CTX_MAX_IDX         8
+#define TLB_CTX_MAX_COPY_ENTRIES (1 << 12)
+
+static unsigned tlb_ctx_nslots = TLB_ASID_CTX_DEFAULT_SLOTS;
+
+typedef struct TLBCtxSlot
+{
+    TLBCtxKey key;
+    /* mmu indexes of the switch that filled the slot; 0 when the slot is free */
+    MMUIdxMap mask;
+    /* subset of mask with a TLB in d[]/f[], indexed by tlb_ctx_pos() */
+    MMUIdxMap      have;
+    uint64_t       lru;
+    CPUTLBDesc     d[TLB_CTX_MAX_IDX];
+    CPUTLBDescFast f[TLB_CTX_MAX_IDX];
+} TLBCtxSlot;
+
+struct TLBCtxCache
+{
+    /* union of every slot's have */
+    MMUIdxMap  held;
+    uint64_t   clock;
+    uint64_t   hits, misses;
+    TLBCtxSlot slot[TLB_CTX_MAX_SLOTS];
+};
+
+void tlb_asid_ctx_set_slots(unsigned n) { tlb_ctx_nslots = MIN(n, TLB_CTX_MAX_SLOTS); }
+
+bool tlb_asid_ctx_enabled(void) { return tlb_ctx_nslots != 0; }
+
+static inline int tlb_ctx_pos(MMUIdxMap mask, int midx) { return ctpop32(mask & (((MMUIdxMap)1 << midx) - 1)); }
+
+static void tlb_ctx_free_idx(TLBCtxSlot* s, int midx)
+{
+    int p = tlb_ctx_pos(s->mask, midx);
+
+    g_free(s->f[p].table);
+    g_free(s->d[p].fulltlb);
+    s->f[p].table   = NULL;
+    s->d[p].fulltlb = NULL;
+    s->have        &= ~((MMUIdxMap)1 << midx);
+    if (s->have == 0) { s->mask = 0; }
+}
+
+static void tlb_ctx_free_slot(TLBCtxSlot* s)
+{
+    for (MMUIdxMap work = s->have; work != 0; work &= work - 1) { tlb_ctx_free_idx(s, ctz32(work)); }
+    s->mask = 0;
+}
+
+static void tlb_ctx_update_held(struct TLBCtxCache* c)
+{
+    c->held = 0;
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) { c->held |= c->slot[i].have; }
+}
+
+static void tlb_ctx_drop_locked(CPUState* cpu, MMUIdxMap idxmap)
+{
+    struct TLBCtxCache* c = cpu->tlb_ctx;
+
+    if (likely(c == NULL || (c->held & idxmap) == 0)) { return; }
+
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
+        TLBCtxSlot* s = &c->slot[i];
+
+        for (MMUIdxMap work = s->have & idxmap; work != 0; work &= work - 1) { tlb_ctx_free_idx(s, ctz32(work)); }
+    }
+    tlb_ctx_update_held(c);
+}
+
+static void tlb_ctx_flush_page_locked(CPUState* cpu, int midx, vaddr page)
+{
+    struct TLBCtxCache* c   = cpu->tlb_ctx;
+    MMUIdxMap           bit = (MMUIdxMap)1 << midx;
+
+    if (likely(c == NULL || (c->held & bit) == 0)) { return; }
+
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
+        TLBCtxSlot* s = &c->slot[i];
+
+        if (s->have & bit) {
+            int p = tlb_ctx_pos(s->mask, midx);
+            tlbd_flush_page_locked(&s->d[p], &s->f[p], page);
+        }
+    }
+}
+
+static void tlb_ctx_flush_range_locked(CPUState* cpu, int midx, vaddr addr, vaddr len, unsigned bits)
+{
+    struct TLBCtxCache* c   = cpu->tlb_ctx;
+    MMUIdxMap           bit = (MMUIdxMap)1 << midx;
+
+    if (likely(c == NULL || (c->held & bit) == 0)) { return; }
+
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
+        TLBCtxSlot* s = &c->slot[i];
+
+        if (s->have & bit) {
+            int p = tlb_ctx_pos(s->mask, midx);
+            tlbd_flush_range_locked(&s->d[p], &s->f[p], addr, len, bits);
+        }
+    }
+}
+
+/* May run on any thread: tlb_reset_dirty() holds the target cpu's tlb_c.lock. */
+static void tlb_ctx_reset_dirty_locked(CPUState* cpu, uintptr_t start, uintptr_t length)
+{
+    struct TLBCtxCache* c = cpu->tlb_ctx;
+
+    if (likely(c == NULL || c->held == 0)) { return; }
+
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
+        TLBCtxSlot* s = &c->slot[i];
+
+        for (MMUIdxMap work = s->have; work != 0; work &= work - 1) {
+            int             p = tlb_ctx_pos(s->mask, ctz32(work));
+            CPUTLBDesc*     d = &s->d[p];
+            CPUTLBDescFast* f = &s->f[p];
+            size_t          n = tlb_n_entries(f);
+
+            for (size_t k = 0; k < n; k++) { tlb_reset_dirty_range_locked(&d->fulltlb[k], &f->table[k], start, length); }
+            for (size_t k = 0; k < CPU_VTLB_SIZE; k++) {
+                tlb_reset_dirty_range_locked(&d->vfulltlb[k], &d->vtable[k], start, length);
+            }
+        }
+    }
+}
+
+static void tlb_ctx_destroy(CPUState* cpu)
+{
+    struct TLBCtxCache* c = cpu->tlb_ctx;
+
+    if (c == NULL) { return; }
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) { tlb_ctx_free_slot(&c->slot[i]); }
+    g_free(c);
+    cpu->tlb_ctx = NULL;
+}
+
+void tlb_asid_ctx_stats(CPUState* cpu, uint64_t* hits, uint64_t* misses)
+{
+    struct TLBCtxCache* c = cpu->tlb_ctx;
+
+    *hits   = c ? qatomic_read(&c->hits) : 0;
+    *misses = c ? qatomic_read(&c->misses) : 0;
+}
+
+static inline bool tlb_ctx_key_equal(const TLBCtxKey* a, const TLBCtxKey* b)
+{ return memcmp(a, b, sizeof(*a)) == 0; }
+
+/*
+ * TLBs are only resized when they are flushed (tlb_mmu_resize_locked), and a
+ * switch that keeps them aside does not flush them. So that a TLB that is
+ * mostly swapped rather than flushed still grows with its use, grow (and so
+ * flush) the live TLB of @midx if a flush now would; return whether it did.
+ * Shrinking is left to real flushes: it only makes flushes cheaper, and a
+ * switch does not flush.
+ */
+static bool tlb_ctx_resize_live(CPUState* cpu, int midx, int64_t now)
+{
+    CPUTLBDesc*     d = &cpu->neg.tlb.d[midx];
+    CPUTLBDescFast* f = cpu_tlb_fast(cpu, midx);
+
+    if (tlb_mmu_resize_size(d, f, now) <= tlb_n_entries(f)) { return false; }
+    tlb_flush_one_mmuidx_locked(cpu, midx, now);
+    return true;
+}
+
+/* Copy the live TLB of @midx into position @p of @s. */
+static void tlb_ctx_copy_live(CPUState* cpu, TLBCtxSlot* s, int p, int midx)
+{
+    CPUTLBDesc*     ld = &cpu->neg.tlb.d[midx];
+    CPUTLBDescFast* lf = cpu_tlb_fast(cpu, midx);
+    size_t          n  = tlb_n_entries(lf);
+
+    s->d[p]         = *ld;
+    s->f[p].mask    = lf->mask;
+    s->f[p].table   = g_memdup2(lf->table, n * sizeof(CPUTLBEntry));
+    s->d[p].fulltlb = g_memdup2(ld->fulltlb, n * sizeof(CPUTLBEntryFull));
+}
+
+void tlb_switch_asid_ctx(CPUState* cpu, MMUIdxMap idxmap, const TLBCtxKey* old_key, const TLBCtxKey* new_key)
+{
+    struct TLBCtxCache* c;
+    TLBCtxSlot *        hit = NULL, *victim = NULL;
+    MMUIdxMap           live, restored = 0;
+    int64_t             now;
+    unsigned            i;
+
+    assert_cpu_is_self(cpu);
+
+    if (tlb_ctx_nslots == 0 || ctpop32(idxmap) > TLB_CTX_MAX_IDX) {
+        tlb_flush_asid_tagged_by_mmuidx(cpu, idxmap);
+        return;
+    }
+
+    now = get_clock_realtime();
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+
+    c = cpu->tlb_ctx;
+    if (unlikely(c == NULL)) { cpu->tlb_ctx = c = g_new0(struct TLBCtxCache, 1); }
+
+    /* Indexes whose live TLB may hold entries of the outgoing address space. */
+    live = idxmap & cpu->neg.tlb.c.dirty;
+
+    for (i = 0; i < tlb_ctx_nslots; i++) {
+        TLBCtxSlot* s = &c->slot[i];
+
+        if (s->mask == 0) {
+            if (victim == NULL || victim->mask != 0) { victim = s; }
+            continue;
+        }
+        if (s->mask == idxmap && tlb_ctx_key_equal(&s->key, new_key)) { hit = s; }
+        else if (s->mask == idxmap && tlb_ctx_key_equal(&s->key, old_key)) {
+            /* Superseded by the live TLB, which is about to be kept aside. */
+            tlb_ctx_free_slot(s);
+            if (victim == NULL || victim->mask != 0) { victim = s; }
+        }
+        else if (victim == NULL || (victim->mask != 0 && s->lru < victim->lru)) {
+            victim = s;
+        }
+    }
+
+    if (hit) {
+        /*
+         * Swap: the slot's TLBs become live, the live ones go into the slot,
+         * which now describes the outgoing address space.
+         */
+        MMUIdxMap was = hit->have;
+
+        hit->have = 0;
+        for (MMUIdxMap work = idxmap; work != 0; work &= work - 1) {
+            int             midx = ctz32(work);
+            MMUIdxMap       bit  = (MMUIdxMap)1 << midx;
+            int             p    = tlb_ctx_pos(idxmap, midx);
+            CPUTLBDesc*     ld   = &cpu->neg.tlb.d[midx];
+            CPUTLBDescFast* lf   = cpu_tlb_fast(cpu, midx);
+
+            if (was & bit) {
+                CPUTLBDesc     td = *ld;
+                CPUTLBDescFast tf = *lf;
+
+                *ld         = hit->d[p];
+                lf->mask    = hit->f[p].mask;
+                lf->table   = hit->f[p].table;
+                hit->d[p]   = td;
+                hit->f[p]   = tf;
+                restored   |= bit;
+                tlb_ctx_resize_live(cpu, midx, now);
+                if (live & bit) { hit->have |= bit; }
+                else {
+                    /* The outgoing TLB was empty; nothing to keep. */
+                    g_free(hit->f[p].table);
+                    g_free(hit->d[p].fulltlb);
+                    hit->f[p].table   = NULL;
+                    hit->d[p].fulltlb = NULL;
+                }
+            }
+            else if (live & bit) {
+                if (tlb_n_entries(lf) <= TLB_CTX_MAX_COPY_ENTRIES) {
+                    tlb_ctx_copy_live(cpu, hit, p, midx);
+                    hit->have |= bit;
+                }
+                if (!tlb_ctx_resize_live(cpu, midx, now)) { tlb_flush_asid_tagged_locked(cpu, midx); }
+            }
+        }
+        hit->key  = *old_key;
+        hit->mask = hit->have ? idxmap : 0;
+        hit->lru  = ++c->clock;
+        /* Restored indexes may hold entries: keep tlb_c.dirty a superset. */
+        if (restored & ~live) { qatomic_or(&cpu->neg.tlb.c.dirty, restored); }
+        qatomic_set(&c->hits, c->hits + 1);
+    }
+    else {
+        /* Keep a copy of the outgoing TLBs, then drop their ASID-tagged entries as usual. */
+        if (victim) { tlb_ctx_free_slot(victim); }
+        for (MMUIdxMap work = live; work != 0; work &= work - 1) {
+            int midx = ctz32(work);
+
+            if (victim && tlb_n_entries(cpu_tlb_fast(cpu, midx)) <= TLB_CTX_MAX_COPY_ENTRIES) {
+                tlb_ctx_copy_live(cpu, victim, tlb_ctx_pos(idxmap, midx), midx);
+                victim->have |= (MMUIdxMap)1 << midx;
+            }
+            if (!tlb_ctx_resize_live(cpu, midx, now)) { tlb_flush_asid_tagged_locked(cpu, midx); }
+        }
+        if (victim && victim->have) {
+            victim->key  = *old_key;
+            victim->mask = idxmap;
+            victim->lru  = ++c->clock;
+        }
+        qatomic_set(&c->misses, c->misses + 1);
+    }
+    tlb_ctx_update_held(c);
+
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+
+    if (live != 0) { tb_jmp_cache_clear_asid_tagged(cpu); }
 }
 
 /* Called with tlb_c.lock held */

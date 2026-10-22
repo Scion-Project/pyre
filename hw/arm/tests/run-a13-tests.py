@@ -51,6 +51,19 @@ TESTS = [
 # Where the host is not AArch64 native-fp is unavailable and the fault
 # controls are skipped. A further check (AArch64 hosts) runs the same code
 # natively and compares with the embedded hash.
+# ASID TLB contexts (-accel tcg,asid-tlbs=N, tlb_switch_asid_ctx()): the
+# same checks with the default 8 slots, with 1 slot (every switch evicts) and
+# with the contexts off. Its last check probes that kept-aside TLBs really
+# come back; the negative control runs the default build with asid-tlbs=0,
+# where that probe must FAIL, so a run that silently fell back to flushing
+# cannot pass the default case.
+ASID_TESTS = [
+    ("asid_tlb", "asid_tlb_test.S", [], "pass", {}),
+    ("asid_tlb (asid-tlbs=1)", "asid_tlb_test.S", [], "pass", {"accel": "asid-tlbs=1"}),
+    ("asid_tlb (asid-tlbs=0)", "asid_tlb_test.S", ["-DNO_ASID_TLBS"], "pass", {"accel": "asid-tlbs=0"}),
+    ("asid_tlb (negative control: asid-tlbs=0)", "asid_tlb_test.S", [], ("mismatch", 73), {"accel": "asid-tlbs=0"}),
+]
+
 IS_AARCH64_HOST = platform.machine().lower() in ("arm64", "aarch64")
 NATIVE_ON_MSG = "native-fp: on (host self-test passed" if IS_AARCH64_HOST else "native-fp: not available"
 FP_TESTS = []
@@ -164,7 +177,7 @@ def main():
         return 2
     qemu = sys.argv[1]
     failures = 0
-    tests = [t + ({},) for t in TESTS] + FP_TESTS
+    tests = [t + ({},) for t in TESTS] + ASID_TESTS + FP_TESTS
     total = skipped = 0
     with tempfile.TemporaryDirectory() as workdir:
         for i, (name, src, flags, expect, opts) in enumerate(tests):
