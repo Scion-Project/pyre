@@ -775,3 +775,7 @@ void apple_sep_map_mmio(AppleSEP* s, AppleSEPMMIOIndex mmio_index, hwaddr addr)
 }
 
 ARMCPU* apple_sep_get_cpu(AppleSEP* s) { return s->cpu; }
+
+void apple_sep_set_cpu_parked(AppleSEP* s, bool parked) { s->cpu_parked = parked; }
+
+bool apple_sep_is_cpu_parked(AppleSEP* s) { return s->cpu_parked; }

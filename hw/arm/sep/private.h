@@ -159,6 +159,7 @@ struct AppleSEP
     vaddr                     base;
     ARMCPU*                   cpu;
     bool                      modern;
+    bool                      cpu_parked;
     MemoryRegion*             ool_mr;
     AddressSpace*             ool_as;
     MemoryRegion              tz0_win_r2;

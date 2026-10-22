@@ -37,6 +37,8 @@ jobs:
         run: |
           command -v clang >/dev/null || sudo apt-get install -y clang
           python3 hw/arm/tests/run-a13-tests.py build/qemu-system-aarch64
+      - name: Host unit tests (hw/arm)
+        run: hw/arm/tests/run-host-tests.sh build/host-tests
 
   build_macos:
     name: macOS Build
@@ -61,3 +63,5 @@ jobs:
           meson compile -C build
       - name: Bare-metal CPU-model tests (a13-test machine)
         run: python3 hw/arm/tests/run-a13-tests.py build/qemu-system-aarch64
+      - name: Host unit tests (hw/arm)
+        run: hw/arm/tests/run-host-tests.sh build/host-tests
