@@ -181,6 +181,16 @@ DEF(cmp_vec, 1, 2, 1, TCG_OPF_VECTOR)
 DEF(bitsel_vec, 1, 3, 0, TCG_OPF_VECTOR)
 DEF(cmpsel_vec, 1, 4, 1, TCG_OPF_VECTOR)
 
+/*
+ * Arm (AArch64) floating point, executed with the host FPU: only for an
+ * AArch64 guest on an AArch64 host, whose FPU implements exactly the same
+ * semantics (TCG_TARGET_HAS_fp_vec). Constant arguments: TCGFPOp, scalar.
+ * fp3_vec computes args[0] = f(args[1] (accumulator), args[2], args[3]).
+ */
+DEF(fp1_vec, 1, 1, 2, TCG_OPF_VECTOR)
+DEF(fp2_vec, 1, 2, 2, TCG_OPF_VECTOR)
+DEF(fp3_vec, 1, 3, 2, TCG_OPF_VECTOR)
+
 DEF(last_generic, 0, 0, 0, TCG_OPF_NOT_PRESENT)
 
 #include "tcg-target-opc.h.inc"

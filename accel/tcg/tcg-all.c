@@ -79,6 +79,7 @@ bool one_insn_per_tb;
 bool tcg_native_fp;
 bool tcg_native_fp_fault;
 bool tcg_native_fp_selftest = true;
+bool tcg_native_fp_inline   = true;
 
 static int tcg_init_machine(AccelState* as, MachineState* ms)
 {
@@ -209,6 +210,9 @@ static void tcg_set_native_fp_fault(Object* obj, bool value, Error** errp) { tcg
 static bool tcg_get_native_fp_selftest(Object* obj, Error** errp) { return tcg_native_fp_selftest; }
 static void tcg_set_native_fp_selftest(Object* obj, bool value, Error** errp) { tcg_native_fp_selftest = value; }
 
+static bool tcg_get_native_fp_inline(Object* obj, Error** errp) { return tcg_native_fp_inline; }
+static void tcg_set_native_fp_inline(Object* obj, bool value, Error** errp) { tcg_native_fp_inline = value; }
+
 static int tcg_gdbstub_supported_sstep_flags(AccelState* as) { return SSTEP_ENABLE | SSTEP_NOIRQ | SSTEP_NOTIMER; }
 
 static void tcg_accel_class_init(ObjectClass* oc, const void* data)
@@ -243,6 +247,9 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
                                    tcg_set_native_fp_selftest);
     object_class_property_set_description(oc, "x-native-fp-selftest",
                                           "Test only: set off to skip the native-fp host self-test");
+    object_class_property_add_bool(oc, "x-native-fp-inline", tcg_get_native_fp_inline, tcg_set_native_fp_inline);
+    object_class_property_set_description(oc, "x-native-fp-inline",
+                                          "Diagnostic: set off to keep native-fp in helpers (no inline host FP)");
 }
 
 static const TypeInfo tcg_accel_type = {

@@ -14,6 +14,7 @@
 #include "native-fp.h"
 
 bool arm_native_fp_on;
+bool arm_native_fp_inline;
 bool arm_native_fp_fault;
 
 #if ARM_NATIVE_FP_HOST
@@ -83,6 +84,7 @@ void arm_native_fp_fold(CPUARMState* env)
 void arm_native_fp_exec_enter(CPUARMState* env)
 {
     static __thread bool fpcr_checked;
+    bool                 want;
 
     if (!arm_native_fp_on) { return; }
     if (unlikely(!fpcr_checked)) {
@@ -95,7 +97,16 @@ void arm_native_fp_exec_enter(CPUARMState* env)
         fpcr_checked = true;
     }
     nfp_in_exec = true;
-    if (!(env->vfp.fpcr & ARM_NATIVE_FP_FPCR_MASK)) { nfp_go_live(env); }
+    want = !(env->vfp.fpcr & ARM_NATIVE_FP_FPCR_MASK);
+    /*
+     * TBs translated with NATIVE_FP emit host FP inline. FPCR writes from
+     * guest code rebuild hflags (handle_sys); writes from outside (gdbstub,
+     * reset, migration) may not have, so make sure before running any TB.
+     */
+    if (is_a64(env) && EX_TBFLAG_A64(env->hflags, NATIVE_FP) != (want && arm_native_fp_inline)) {
+        arm_rebuild_hflags(env);
+    }
+    if (want) { nfp_go_live(env); }
 }
 
 void arm_native_fp_exec_exit(CPUARMState* env)
@@ -145,7 +156,8 @@ void arm_native_fp_init(void)
         return;
     }
     if (!tcg_native_fp_selftest) {
-        arm_native_fp_on = true;
+        arm_native_fp_on     = true;
+        arm_native_fp_inline = tcg_native_fp_inline;
         warn_report("native-fp: on, host self-test SKIPPED (x-native-fp-selftest=off)");
         return;
     }
@@ -155,8 +167,10 @@ void arm_native_fp_init(void)
         warn_report("native-fp: host self-test failed: %s; guest FP stays on softfloat", bad);
         return;
     }
-    arm_native_fp_on = true;
-    info_report("native-fp: on (host self-test passed, %u cases)", ncases);
+    arm_native_fp_on     = true;
+    arm_native_fp_inline = tcg_native_fp_inline;
+    info_report("native-fp: on (host self-test passed, %u cases)%s", ncases,
+                arm_native_fp_inline ? "" : ", helpers only (x-native-fp-inline=off)");
 }
 
 #else /* !ARM_NATIVE_FP_HOST */
