@@ -29,9 +29,44 @@ bool translator_io_start(DisasContextBase* db)
     return true;
 }
 
+/* ANALYSIS ONLY (tbprof): per-TB execution counters, enabled by TBPROF=<file>. */
+uint64_t*          tbprof_counts;
+__thread uint32_t  tbprof_cur;
+static uint32_t    tbprof_next = 1;
+static int         tbprof_state;
+#define TBPROF_MAX (8u << 20)
+
+static void tbprof_dump(void)
+{
+    FILE* f = fopen(getenv("TBPROF"), "w");
+    if (!f) { return; }
+    for (uint32_t i = 1; i < tbprof_next && i < TBPROF_MAX; i++) {
+        if (tbprof_counts[i]) { fprintf(f, "%u %" PRIu64 "\n", i, tbprof_counts[i]); }
+    }
+    fclose(f);
+}
+
 static void gen_tb_start(DisasContextBase* db, uint32_t cflags)
 {
     TCGv_i32 req = NULL;
+
+    if (tbprof_state == 0) {
+        tbprof_state = getenv("TBPROF") ? 1 : -1;
+        if (tbprof_state > 0) {
+            tbprof_counts = g_new0(uint64_t, TBPROF_MAX);
+            atexit(tbprof_dump);
+        }
+    }
+    tbprof_cur = 0;
+    if (tbprof_state > 0 && tbprof_next < TBPROF_MAX) {
+        TCGv_i64 v = tcg_temp_new_i64();
+        TCGv_ptr p = tcg_temp_new_ptr();
+        tbprof_cur = tbprof_next++;
+        tcg_gen_movi_ptr(p, (uintptr_t)&tbprof_counts[tbprof_cur]);
+        tcg_gen_ld_i64(v, p, 0);
+        tcg_gen_addi_i64(v, v, 1);
+        tcg_gen_st_i64(v, p, 0);
+    }
 
     if (!(cflags & CF_NOIRQ)) {
         QEMU_BUILD_BUG_ON(sizeof_field(CPUState, neg.tb_exit_request) != 1);

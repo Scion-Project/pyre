@@ -363,11 +363,15 @@ restart_translate:
                 data_size       = 0;
             }
 
+            extern __thread uint32_t tbprof_cur;
+            const uint32_t* code = (const uint32_t*)tb->tc.ptr;
+#define TBPROF_WORDS(a, b) do { for (size_t _o = (a); _o < (b); _o += 4) fprintf(logfile, "W %08x\n", code[_o / 4]); } while (0)
             /* Dump header and the first instruction */
-            fprintf(logfile, "OUT: [size=%d]\n", gen_code_size);
+            fprintf(logfile, "OUT: [size=%d] TBIDX %u PC %" PRIx64 " ICOUNT %d\n", gen_code_size, tbprof_cur, (uint64_t)s.pc, tb->icount);
             fprintf(logfile, "  -- guest addr 0x%016" PRIx64 " + tb prologue\n",
                     tcg_ctx->gen_insn_data[insn * INSN_START_WORDS]);
             chunk_start = tcg_ctx->gen_insn_end_off[insn];
+            TBPROF_WORDS(0, chunk_start);
 
             /*
              * Dump each instruction chunk, wrapping up empty chunks into
@@ -379,12 +383,13 @@ restart_translate:
                 if (chunk_end > chunk_start) {
                     fprintf(logfile, "  -- guest addr 0x%016" PRIx64 "\n",
                             tcg_ctx->gen_insn_data[insn * INSN_START_WORDS]);
+                    TBPROF_WORDS(chunk_start, chunk_end);
                     chunk_start = chunk_end;
                 }
                 insn++;
             }
 
-            if (chunk_start < code_size) { fprintf(logfile, "  -- tb slow paths + alignment\n"); }
+            if (chunk_start < code_size) { fprintf(logfile, "  -- tb slow paths + alignment\n"); TBPROF_WORDS(chunk_start, code_size); }
 
             /* Finally dump any data we may have after the block */
             if (data_size) {
