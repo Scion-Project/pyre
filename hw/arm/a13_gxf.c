@@ -52,7 +52,16 @@ static void sprr_perm_el0_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64
     uint64_t perm = raw_read(env, ri);
     uint32_t mask = env->sprr.mprr_el_br_el1[0][0];
     if (arm_current_el(env)) {
-        raw_write(env, ri, value);
+        /*
+         * The kernel restores a thread's EL0 permissions on every context
+         * switch. Entries filled under the old ones would keep them (ptw.c
+         * folds SPRR into the TLB entry), so flush when they change, as the
+         * EL0 path below does.
+         */
+        if (perm != value) {
+            raw_write(env, ri, value);
+            tlb_flush_by_mmuidx(env_cpu(env), ARMMMUIdxBit_E10_0);
+        }
         return;
     }
 
@@ -76,6 +85,19 @@ static void sprr_perm_el0_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64
     raw_write(env, ri, perm);
 
     tlb_flush_by_mmuidx(env_cpu(env), ARMMMUIdxBit_E10_0);
+}
+
+/*
+ * SPRR_CONFIG_EL0/EL1 and SPRR_EL1BR1_EL1: like the EL0 permissions, they are
+ * folded into TLB entries when those are filled, so a change flushes the
+ * EL1&0 TLBs. Rewriting the same value does not.
+ */
+static void sprr_el1_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t value)
+{
+    if (raw_read(env, ri) != value) {
+        raw_write(env, ri, value);
+        tlb_flush_by_mmuidx(env_cpu(env), vae1_tlbmask(env));
+    }
 }
 
 static uint64_t gxf_cpreg_raw_read(CPUARMState* env, const ARMCPRegInfo* ri)
@@ -385,7 +407,8 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
         .access      = PL1_RW,
         .resetvalue  = 0,
         .readfn      = raw_read,
-        .writefn     = raw_write,
+        .writefn     = sprr_el1_write,
+        .raw_writefn = raw_write,
         .fieldoffset = offsetof(CPUARMState, sprr.sprr_config_el[1]),
     },
     {
@@ -400,7 +423,8 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
         .access      = PL1_RW,
         .resetvalue  = 0,
         .readfn      = raw_read,
-        .writefn     = raw_write,
+        .writefn     = sprr_el1_write,
+        .raw_writefn = raw_write,
         .fieldoffset = offsetof(CPUARMState, sprr.sprr_config_el[0]),
     },
     {
@@ -459,7 +483,8 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
         .access      = PL1_RW,
         .resetvalue  = 0,
         .readfn      = raw_read,
-        .writefn     = raw_write,
+        .writefn     = sprr_el1_write,
+        .raw_writefn = raw_write,
         .fieldoffset = offsetof(CPUARMState, sprr.sprr_el_br_el1[1][1]),
     },
     {
