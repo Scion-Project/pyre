@@ -43,7 +43,7 @@ WORKLOADS = [
     ("w8", ["-DWORKLOAD=8", "-DITERS=2000000"], "40M scalar FP (FMADD/FDIV/FSQRT/FCMP/FCVTZS/SCVTF)"),
     ("w9", ["-DWORKLOAD=9", "-DITERS=1000000"], "2M ASID switches, KPTI-style (16 pages, 4 calls each)"),
     ("w10", ["-DWORKLOAD=10", "-DITERS=20000000"], "320M loads/stores, softmmu TLB hits"),
-    ("w11", ["-DWORKLOAD=11", "-DITERS=1000000"], "4M loads, each from another of 16384 pages (TLB refills)"),
+    ("w11", ["-DWORKLOAD=11", "-DITERS=1000000"], "4M loads scattered over 4096 pages (TLB refills)"),
 ]
 
 

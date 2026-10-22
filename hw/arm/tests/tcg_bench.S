@@ -26,10 +26,10 @@
  *      16 pages and 4 spread calls in between (turns the MMU on, 16 KiB
  *      pages, all mappings non-global)
  *  10  loads and stores that hit the softmmu TLB: 16 per iteration, mixed
- *      sizes, over four 4 KiB pages (MMU off)
- *  11  TLB refills: one load from each of 16384 4 KiB pages in turn (MMU on,
- *      16 KiB pages, 64 MiB of VA aliased onto 512 KiB of RAM), so every
- *      access walks the page table unless the softmmu TLB holds them all
+ *      sizes, within one 16 KiB page (MMU off)
+ *  11  TLB refills: loads scattered over 4096 16 KiB pages (MMU on, 64 MiB
+ *      of VA aliased onto 512 KiB of RAM), so nearly every access walks the
+ *      page table unless the softmmu TLB holds all 4096 pages
  *
  * This file is a test input; it is not compiled into QEMU. It uses only
  * architectural encodings - no Apple code or data.
@@ -320,7 +320,7 @@ _start:
     isb
     ldr     x27, =W11_VA
     mov     x22, #0
-    ldr     x23, =5039                      /* odd stride: visits all 16384 4 KiB pages */
+    ldr     x23, =5039                      /* odd stride over 16384 4 KiB slots: every page, 4x a cycle */
     ldr     x24, =16383
 1:
     .rept 4
