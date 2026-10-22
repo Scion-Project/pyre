@@ -52,6 +52,7 @@ struct TCGState
     int           splitwx_enabled;
     unsigned long tb_size;
     uint32_t      asid_tlbs;
+    bool          asid_jc;
 };
 typedef struct TCGState TCGState;
 
@@ -76,6 +77,7 @@ static void tcg_accel_instance_init(Object* obj)
     s->splitwx_enabled = 0;
 #endif
     s->asid_tlbs = TLB_ASID_CTX_DEFAULT_SLOTS;
+    s->asid_jc   = true;
 }
 
 bool one_insn_per_tb;
@@ -202,6 +204,19 @@ static void tcg_set_asid_tlbs(Object* obj, Visitor* v, const char* name, void* o
     tlb_asid_ctx_set_slots(value);
 }
 
+static bool tcg_get_asid_jc(Object* obj, Error** errp)
+{
+    TCGState* s = TCG_STATE(obj);
+    return s->asid_jc;
+}
+
+static void tcg_set_asid_jc(Object* obj, bool value, Error** errp)
+{
+    TCGState* s = TCG_STATE(obj);
+    s->asid_jc  = value;
+    tlb_asid_ctx_set_jc(value);
+}
+
 static bool tcg_get_splitwx(Object* obj, Error** errp)
 {
     TCGState* s = TCG_STATE(obj);
@@ -263,6 +278,9 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
     object_class_property_add(oc, "asid-tlbs", "uint32", tcg_get_asid_tlbs, tcg_set_asid_tlbs, NULL, NULL);
     object_class_property_set_description(oc, "asid-tlbs",
                                           "TLBs of recently left address spaces kept per vCPU (0 disables)");
+
+    object_class_property_add_bool(oc, "x-asid-jc", tcg_get_asid_jc, tcg_set_asid_jc);
+    object_class_property_set_description(oc, "x-asid-jc", "Keep jump caches with the asid-tlbs TLBs (default on)");
 
     object_class_property_add_bool(oc, "split-wx", tcg_get_splitwx, tcg_set_splitwx);
     object_class_property_set_description(oc, "split-wx", "Map jit pages into separate RW and RX regions");

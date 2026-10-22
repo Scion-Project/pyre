@@ -268,6 +268,15 @@ bool tlb_asid_ctx_enabled(void);
 #define TLB_ASID_CTX_MAX_SLOTS     16
 void tlb_asid_ctx_set_slots(unsigned n);
 
+/* Whether tlb_switch_asid_ctx() also keeps jump caches aside ("x-asid-jc", default on). */
+void tlb_asid_ctx_set_jc(bool on);
+
+/*
+ * Mark every kept-aside jump cache of @cpu stale: called whenever @cpu's live
+ * jump cache is cleared as a whole (tcg_flush_jmp_cache()). Any thread.
+ */
+void tlb_asid_ctx_jc_invalidate(CPUState* cpu);
+
 /* Number of tlb_switch_asid_ctx() calls on @cpu that found / did not find the incoming TLBs. */
 void tlb_asid_ctx_stats(CPUState* cpu, uint64_t* hits, uint64_t* misses);
 
