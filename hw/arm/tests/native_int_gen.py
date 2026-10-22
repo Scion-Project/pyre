@@ -208,7 +208,7 @@ class Gen:
                 imm = r.randrange(-256, 256)
                 lo, hi = 64, WINDOW - 64
                 if not (lo <= cur + imm <= hi):
-                    imm = -imm if lo <= cur - imm <= hi else 0
+                    imm = -imm if lo <= cur - imm <= hi and -imm != 256 else 0
                 self.emit(f"{op} {dst}, [x{b}, #{imm}]!" if mode == "pre" else f"{op} {dst}, [x{b}], #{imm}")
                 self.off[b] = cur + imm
         elif k <= 5:
@@ -249,7 +249,7 @@ class Gen:
             imm = r.randrange(-64, 64) * scale
             lo, hi = 128, WINDOW - 128
             if not (lo <= cur + imm <= hi):
-                imm = -imm if lo <= cur - imm <= hi else 0
+                imm = -imm if lo <= cur - imm <= hi and -imm != 64 * scale else 0
             if mode == "off":
                 self.emit(f"{kind} {ra}, {rc}, [x{b}, #{imm}]")
             elif mode == "pre":

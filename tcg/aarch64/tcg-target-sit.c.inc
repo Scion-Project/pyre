@@ -22,6 +22,7 @@
  */
 
 #include "tcg/tcg-sit.h"
+#include "accel/tcg/native-int.h"
 
 #define SIT_S0 TCG_REG_X16
 #define SIT_S1 TCG_REG_X17
@@ -493,7 +494,7 @@ static bool sit_slow_out(TCGContext* s, SitSlow* sp)
 
     if (!reloc_pc19(sp->label_ptr, tcg_splitwx_to_rx(s->code_ptr))) { return false; }
 
-    sit_writeback(s, &sp->map);
+    if (!tcg_native_int_fault) { sit_writeback(s, &sp->map); }
 
     /* env, addr, [data], oi, retaddr */
     if (is_ld) {
