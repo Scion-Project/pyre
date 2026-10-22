@@ -46,7 +46,8 @@ TESTS = [
 # with native-fp off and on. The host self-test must catch an injected
 # native fault (the run then falls back to softfloat and still PASSes), and
 # with the self-test skipped the injected fault must change the hash (FAIL at
-# check 1): together they show both guards detect a wrong native result.
+# check 1), both with inline host FP and with native FP in helpers only:
+# together they show both guards detect a wrong native result.
 # Where the host is not AArch64 native-fp is unavailable and the fault
 # controls are skipped. A further check (AArch64 hosts) runs the same code
 # natively and compares with the embedded hash.
@@ -58,6 +59,8 @@ for _variant, _flags in (("", []), (", sticky FPSR", ["-DSTICKY"])):
         (f"fp_native_check{_variant}, native-fp=off", "fp_native_check.S", _flags, "pass", {}),
         (f"fp_native_check{_variant}, native-fp=on", "fp_native_check.S", _flags, "pass",
          {"accel": "native-fp=on", "need": NATIVE_ON_MSG}),
+        (f"fp_native_check{_variant}, native-fp=on, helpers only (x-native-fp-inline=off)", "fp_native_check.S",
+         _flags, "pass", {"accel": "native-fp=on,x-native-fp-inline=off", "need": NATIVE_ON_MSG}),
         (f"fp_native_check{_variant} (negative control: injected fault, self-test catches it)",
          "fp_native_check.S", _flags, "pass",
          {"accel": "native-fp=on,x-native-fp-fault=on", "need": "native-fp: host self-test failed",
@@ -65,6 +68,10 @@ for _variant, _flags in (("", []), (", sticky FPSR", ["-DSTICKY"])):
         (f"fp_native_check{_variant} (negative control: injected fault, self-test skipped)",
          "fp_native_check.S", _flags, ("mismatch", 1),
          {"accel": "native-fp=on,x-native-fp-fault=on,x-native-fp-selftest=off", "aarch64_only": True}),
+        (f"fp_native_check{_variant} (negative control: injected fault, self-test skipped, helpers only)",
+         "fp_native_check.S", _flags, ("mismatch", 1),
+         {"accel": "native-fp=on,x-native-fp-fault=on,x-native-fp-selftest=off,x-native-fp-inline=off",
+          "aarch64_only": True}),
     ]
 
 
