@@ -39,6 +39,7 @@ WORKLOADS = [
     ("w4", ["-DWORKLOAD=4", "-DITERS=100000000"], "ALU loop (control)"),
     ("w5", ["-DWORKLOAD=5", "-DITERS=4000000"], "as w2 + 62.5k TB invalidations"),
     ("w6", ["-DWORKLOAD=6", "-DITERS=5000000"], "40M MSR TPIDR_EL1/ELR_EL1"),
+    ("w7", ["-DWORKLOAD=7", "-DITERS=2000000"], "48M vector FMLA/FMUL/FADD (.4s/.2d)"),
 ]
 
 

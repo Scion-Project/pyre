@@ -1130,6 +1130,105 @@ static float32 float32_rsqrts_nf(float32 op1, float32 op2, float_status* stat)
     return float32_div(op1, float32_two, stat);
 }
 
+/*
+ * PROOF OF CONCEPT (same-ISA fast path, docs/SAME-ISA-FASTPATH.md): on an
+ * AArch64 host, run single/double-precision vector FADD/FSUB/FMUL/FMLA/FMLS
+ * on the host FPU instead of softfloat. Guest and host implement the same
+ * architecture, so with the same FPCR controls the host instruction produces
+ * the bit-identical result and the same FPSR cumulative flags (NaN
+ * propagation, tininess-before-rounding, fused rounding are all Arm rules).
+ *
+ * Used only when QEMU_TCG_NATIVE_FP=1 is set in the environment, the host
+ * FPCR is all-zero (round-to-nearest, no FZ/DN/AH/FIZ, no traps), and the
+ * guest float_status describes the same mode: round-to-nearest-even, no
+ * flush-to-zero of inputs or outputs, no default-NaN mode and the FPCR.AH=0
+ * NaN/tininess rules. Anything else falls back to softfloat. Host FPSR
+ * flags raised by the native operation are folded into the guest status.
+ */
+#ifdef __aarch64__
+static int native_fp_state; /* 0 unknown, 1 on, -1 off */
+
+static bool native_fp_enabled(void)
+{
+    if (unlikely(native_fp_state == 0)) {
+        const char* e    = getenv("QEMU_TCG_NATIVE_FP");
+        uint64_t    fpcr;
+        asm volatile("mrs %0, fpcr" : "=r"(fpcr));
+        native_fp_state = (e && e[0] == '1' && fpcr == 0) ? 1 : -1;
+    }
+    return native_fp_state > 0;
+}
+
+static inline bool native_fp_ok(const float_status* s)
+{
+    return native_fp_enabled() && s->float_rounding_mode == float_round_nearest_even && !s->flush_to_zero &&
+           !s->flush_inputs_to_zero && !s->default_nan_mode && s->float_2nan_prop_rule == float_2nan_prop_s_ab &&
+           s->float_3nan_prop_rule == float_3nan_prop_s_cab && s->tininess_before_rounding;
+}
+
+static inline void native_fp_begin(void) { asm volatile("msr fpsr, xzr" ::: "memory"); }
+
+static inline void native_fp_end(float_status* s)
+{
+    uint64_t fpsr;
+    int      f = 0;
+    asm volatile("mrs %0, fpsr" : "=r"(fpsr)::"memory");
+    if (fpsr & 1) { f |= float_flag_invalid; }
+    if (fpsr & 2) { f |= float_flag_divbyzero; }
+    if (fpsr & 4) { f |= float_flag_overflow; }
+    if (fpsr & 8) { f |= float_flag_underflow; }
+    if (fpsr & 16) { f |= float_flag_inexact; }
+    if (f) { float_raise(f, s); }
+}
+
+#define NATIVE_3OP(NAME, CTYPE, EXPR)                                                                \
+    static bool native_##NAME(void* vd, void* vn, void* vm, float_status* stat, uint32_t desc)       \
+    {                                                                                                \
+        intptr_t i, oprsz = simd_oprsz(desc);                                                        \
+        CTYPE *  d = vd, *n = vn, *m = vm;                                                           \
+        if (!native_fp_ok(stat)) { return false; }                                                   \
+        native_fp_begin();                                                                           \
+        for (i = 0; i < oprsz / sizeof(CTYPE); i++) { d[i] = EXPR; }                                 \
+        native_fp_end(stat);                                                                         \
+        clear_tail(d, oprsz, simd_maxsz(desc));                                                      \
+        return true;                                                                                 \
+    }
+
+/*
+ * Inline asm, not C operators: the compiler treats fadd/fmul as commutative
+ * and may swap operands, which changes which NaN payload propagates.
+ */
+#define A2(INSN, R, T, a, b)                                                                         \
+    ({ T _r; asm(INSN " %" R "0, %" R "1, %" R "2" : "=w"(_r) : "w"(a), "w"(b)); _r; })
+#define A3(INSN, R, T, a, b, c)                                                                      \
+    ({ T _r; asm(INSN " %" R "0, %" R "1, %" R "2, %" R "3" : "=w"(_r) : "w"(a), "w"(b), "w"(c)); _r; })
+NATIVE_3OP(gvec_fadd_s, float, A2("fadd", "s", float, n[i], m[i]))
+NATIVE_3OP(gvec_fadd_d, double, A2("fadd", "d", double, n[i], m[i]))
+NATIVE_3OP(gvec_fsub_s, float, A2("fsub", "s", float, n[i], m[i]))
+NATIVE_3OP(gvec_fsub_d, double, A2("fsub", "d", double, n[i], m[i]))
+NATIVE_3OP(gvec_fmul_s, float, A2("fmul", "s", float, n[i], m[i]))
+NATIVE_3OP(gvec_fmul_d, double, A2("fmul", "d", double, n[i], m[i]))
+/* FMLA/FMLS: Vd = Vd +/- Vn * Vm, fused. FMADD/FMSUB Rd = Ra +/- Rn * Rm use the same FPMulAdd(addend, op1, op2). */
+NATIVE_3OP(gvec_vfma_s, float, A3("fmadd", "s", float, n[i], m[i], d[i]))
+NATIVE_3OP(gvec_vfma_d, double, A3("fmadd", "d", double, n[i], m[i], d[i]))
+NATIVE_3OP(gvec_vfms_s, float, A3("fmsub", "s", float, n[i], m[i], d[i]))
+NATIVE_3OP(gvec_vfms_d, double, A3("fmsub", "d", double, n[i], m[i], d[i]))
+#define NATIVE_TRY(NAME)                                                         \
+    if (native_##NAME(vd, vn, vm, stat, desc)) { return; }
+#else
+#define NATIVE_TRY(NAME)
+#endif
+
+#define DO_3OP_N(NAME, FUNC, TYPE)                                                       \
+    void HELPER(NAME)(void* vd, void* vn, void* vm, float_status* stat, uint32_t desc) \
+    {                                                                                  \
+        intptr_t i, oprsz = simd_oprsz(desc);                                          \
+        NATIVE_TRY(NAME)                                                               \
+        TYPE *   d = vd, *n = vn, *m = vm;                                             \
+        for (i = 0; i < oprsz / sizeof(TYPE); i++) { d[i] = FUNC(n[i], m[i], stat); }  \
+        clear_tail(d, oprsz, simd_maxsz(desc));                                        \
+    }
+
 #define DO_3OP(NAME, FUNC, TYPE)                                                       \
     void HELPER(NAME)(void* vd, void* vn, void* vm, float_status* stat, uint32_t desc) \
     {                                                                                  \
@@ -1141,20 +1240,20 @@ static float32 float32_rsqrts_nf(float32 op1, float32 op2, float_status* stat)
 
 DO_3OP(gvec_fadd_b16, bfloat16_add, float16)
 DO_3OP(gvec_fadd_h, float16_add, float16)
-DO_3OP(gvec_fadd_s, float32_add, float32)
-DO_3OP(gvec_fadd_d, float64_add, float64)
+DO_3OP_N(gvec_fadd_s, float32_add, float32)
+DO_3OP_N(gvec_fadd_d, float64_add, float64)
 DO_3OP(gvec_bfadd, bfloat16_add, bfloat16)
 
 DO_3OP(gvec_fsub_b16, bfloat16_sub, float16)
 DO_3OP(gvec_fsub_h, float16_sub, float16)
-DO_3OP(gvec_fsub_s, float32_sub, float32)
-DO_3OP(gvec_fsub_d, float64_sub, float64)
+DO_3OP_N(gvec_fsub_s, float32_sub, float32)
+DO_3OP_N(gvec_fsub_d, float64_sub, float64)
 DO_3OP(gvec_bfsub, bfloat16_sub, bfloat16)
 
 DO_3OP(gvec_fmul_b16, bfloat16_mul, float16)
 DO_3OP(gvec_fmul_h, float16_mul, float16)
-DO_3OP(gvec_fmul_s, float32_mul, float32)
-DO_3OP(gvec_fmul_d, float64_mul, float64)
+DO_3OP_N(gvec_fmul_s, float32_mul, float32)
+DO_3OP_N(gvec_fmul_d, float64_mul, float64)
 
 DO_3OP(gvec_ftsmul_h, float16_ftsmul, float16)
 DO_3OP(gvec_ftsmul_s, float32_ftsmul, float32)
@@ -1312,6 +1411,16 @@ static float64 float64_ah_mulsub_f(float64 dest, float64 op1, float64 op2, float
         clear_tail(d, oprsz, simd_maxsz(desc));                                             \
     }
 
+#define DO_MULADD_N(NAME, FUNC, TYPE)                                                         \
+    void HELPER(NAME)(void* vd, void* vn, void* vm, float_status* stat, uint32_t desc)      \
+    {                                                                                       \
+        intptr_t i, oprsz = simd_oprsz(desc);                                               \
+        NATIVE_TRY(NAME)                                                                    \
+        TYPE *   d = vd, *n = vn, *m = vm;                                                  \
+        for (i = 0; i < oprsz / sizeof(TYPE); i++) { d[i] = FUNC(d[i], n[i], m[i], stat); } \
+        clear_tail(d, oprsz, simd_maxsz(desc));                                             \
+    }
+
 DO_MULADD(gvec_fmla_nf_h, float16_muladd_nf, float16)
 DO_MULADD(gvec_fmla_nf_s, float32_muladd_nf, float32)
 
@@ -1319,13 +1428,13 @@ DO_MULADD(gvec_fmls_nf_h, float16_mulsub_nf, float16)
 DO_MULADD(gvec_fmls_nf_s, float32_mulsub_nf, float32)
 
 DO_MULADD(gvec_vfma_h, float16_muladd_f, float16)
-DO_MULADD(gvec_vfma_s, float32_muladd_f, float32)
-DO_MULADD(gvec_vfma_d, float64_muladd_f, float64)
+DO_MULADD_N(gvec_vfma_s, float32_muladd_f, float32)
+DO_MULADD_N(gvec_vfma_d, float64_muladd_f, float64)
 DO_MULADD(gvec_bfmla, bfloat16_muladd_f, bfloat16)
 
 DO_MULADD(gvec_vfms_h, float16_mulsub_f, float16)
-DO_MULADD(gvec_vfms_s, float32_mulsub_f, float32)
-DO_MULADD(gvec_vfms_d, float64_mulsub_f, float64)
+DO_MULADD_N(gvec_vfms_s, float32_mulsub_f, float32)
+DO_MULADD_N(gvec_vfms_d, float64_mulsub_f, float64)
 DO_MULADD(gvec_bfmls, bfloat16_mulsub_f, bfloat16)
 
 DO_MULADD(gvec_ah_vfms_h, float16_ah_mulsub_f, float16)

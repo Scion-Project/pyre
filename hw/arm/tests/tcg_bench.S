@@ -18,6 +18,7 @@
  *   5  as 2, plus a store over just-executed code every 64 iterations
  *      (one TB invalidation each)
  *   6  MSR TPIDR_EL1 / MSR ELR_EL1 (system-register writes)
+ *   7  vector FP: FMLA/FMUL/FADD on .4s and .2d (softfloat helpers today)
  *
  * This file is a test input; it is not compiled into QEMU. It uses only
  * architectural encodings - no Apple code or data.
@@ -116,6 +117,29 @@ _start:
 1:  .rept 4
     msr     tpidr_el1, x20
     msr     elr_el1, x20
+    .endr
+    subs    x20, x20, #1
+    b.ne    1b
+#elif WORKLOAD == 7
+    /* vector FP, register-only: 4 x (FMLA, FMUL, FADD) on .4s and on .2d per
+     * iteration; every one is a gvec helper call into softfloat today */
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)          /* FPEN: no FP/SIMD traps at EL1 */
+    msr     cpacr_el1, x0
+    isb
+    fmov    v0.4s, #1.0
+    fmov    v1.4s, #0.5
+    fmov    v2.2d, #1.0
+    fmov    v3.2d, #0.5
+    movi    v4.4s, #0
+    movi    v7.2d, #0
+1:  .rept 4
+    fmla    v4.4s, v0.4s, v1.4s
+    fmul    v5.4s, v4.4s, v1.4s
+    fadd    v6.4s, v5.4s, v0.4s
+    fmla    v7.2d, v2.2d, v3.2d
+    fmul    v16.2d, v7.2d, v3.2d
+    fadd    v17.2d, v16.2d, v2.2d
     .endr
     subs    x20, x20, #1
     b.ne    1b
