@@ -652,6 +652,9 @@ static inline void set_disas_label(DisasContext* s, DisasLabel l)
     s->pc_save = l.pc_save;
 }
 
+/* tcg_gen_lookup_and_goto_ptr(), with the TB state computed inline */
+static inline void gen_lookup_and_goto_ptr(void) { tcg_gen_lookup_and_goto_ptr_via(gen_helper_arm_lookup_tb_ptr); }
+
 static inline TCGv_ptr gen_lookup_cp_reg(uint32_t key)
 {
     TCGv_ptr ret = tcg_temp_new_ptr();
