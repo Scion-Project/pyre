@@ -217,7 +217,9 @@ static void tlb_mmu_resize_locked(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_
     bool    window_expired = now > desc->window_begin_ns + window_len_ns;
 
     if (desc->n_used_entries > desc->window_max_entries) { desc->window_max_entries = desc->n_used_entries; }
-    rate = desc->window_max_entries * 100 / old_size;
+    /* n_used_entries counts main-table entries, so it cannot exceed the size; clamp all the same. */
+    desc->window_max_entries = MIN(desc->window_max_entries, old_size);
+    rate                     = desc->window_max_entries * 100 / old_size;
 
     if (rate > 70) { new_size = MIN(old_size << 1, 1 << CPU_TLB_DYN_MAX_BITS); }
     else if (rate < 30 && window_expired) {
@@ -482,16 +484,18 @@ static bool tlb_flush_entry_mask_locked(CPUTLBEntry* tlb_entry, vaddr page, vadd
 static inline bool tlb_flush_entry_locked(CPUTLBEntry* tlb_entry, vaddr page)
 { return tlb_flush_entry_mask_locked(tlb_entry, page, -1); }
 
-/* Called with tlb_c.lock held */
+/*
+ * Called with tlb_c.lock held. n_used_entries counts the entries of the main
+ * table only (an entry evicted to the victim table is uncounted, one swapped
+ * back in is counted again), so clearing victim entries leaves it alone.
+ */
 static void tlb_flush_vtlb_page_mask_locked(CPUState* cpu, int mmu_idx, vaddr page, vaddr mask)
 {
     CPUTLBDesc* d = &cpu->neg.tlb.d[mmu_idx];
     int         k;
 
     assert_cpu_is_self(cpu);
-    for (k = 0; k < CPU_VTLB_SIZE; k++) {
-        if (tlb_flush_entry_mask_locked(&d->vtable[k], page, mask)) { tlb_n_used_entries_dec(cpu, mmu_idx); }
-    }
+    for (k = 0; k < CPU_VTLB_SIZE; k++) { tlb_flush_entry_mask_locked(&d->vtable[k], page, mask); }
 }
 
 static inline void tlb_flush_vtlb_page_locked(CPUState* cpu, int mmu_idx, vaddr page)
@@ -517,7 +521,6 @@ static void tlb_flush_asid_tagged_locked(CPUState* cpu, int midx)
     for (i = 0; i < CPU_VTLB_SIZE; i++) {
         if (tlb_entry_is_asid_tagged(&desc->vtable[i], &desc->vfulltlb[i])) {
             memset(&desc->vtable[i], -1, sizeof(CPUTLBEntry));
-            tlb_n_used_entries_dec(cpu, midx);
         }
     }
 }
@@ -1182,13 +1185,16 @@ void tlb_set_page_full(CPUState* cpu, int mmu_idx, vaddr addr, CPUTLBEntryFull* 
      * Only evict the old entry to the victim tlb if it's for a
      * different page; otherwise just overwrite the stale data.
      */
-    if (!tlb_hit_page_anyprot(te, addr_page) && !tlb_entry_is_empty(te)) {
-        unsigned     vidx = desc->vindex++ % CPU_VTLB_SIZE;
-        CPUTLBEntry* tv   = &desc->vtable[vidx];
+    if (!tlb_entry_is_empty(te)) {
+        if (!tlb_hit_page_anyprot(te, addr_page)) {
+            unsigned     vidx = desc->vindex++ % CPU_VTLB_SIZE;
+            CPUTLBEntry* tv   = &desc->vtable[vidx];
 
-        /* Evict the old entry into the victim tlb.  */
-        copy_tlb_helper_locked(tv, te);
-        desc->vfulltlb[vidx] = desc->fulltlb[index];
+            /* Evict the old entry into the victim tlb.  */
+            copy_tlb_helper_locked(tv, te);
+            desc->vfulltlb[vidx] = desc->fulltlb[index];
+        }
+        /* Evicted or overwritten: replaced by the new entry, counted below. */
         tlb_n_used_entries_dec(cpu, mmu_idx);
     }
 
@@ -1363,6 +1369,7 @@ static bool victim_tlb_hit(CPUState* cpu, size_t mmu_idx, size_t index, MMUAcces
             CPUTLBEntry tmptlb, *tlb = &cpu_tlb_fast(cpu, mmu_idx)->table[index];
 
             qemu_spin_lock(&cpu->neg.tlb.c.lock);
+            if (tlb_entry_is_empty(tlb)) { tlb_n_used_entries_inc(cpu, mmu_idx); }
             copy_tlb_helper_locked(&tmptlb, tlb);
             copy_tlb_helper_locked(tlb, vtlb);
             copy_tlb_helper_locked(vtlb, &tmptlb);
