@@ -430,4 +430,10 @@ typedef struct float_status
     bool rebias_overflow;
     /* should underflowed results add re_bias to its exponent? */
     bool rebias_underflow;
+    /*
+     * Target-managed, ignored by softfloat: set while target helpers may
+     * execute operations for this status on the host FPU instead (same-ISA
+     * hosts only, see target/arm/tcg/native-fp.h).
+     */
+    bool host_fpu_native;
 } float_status;

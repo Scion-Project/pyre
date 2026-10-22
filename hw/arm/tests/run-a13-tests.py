@@ -17,6 +17,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import os
+import platform
 import re
 import struct
 import subprocess
@@ -39,6 +40,32 @@ TESTS = [
     ("gxf_banked_el1", "gxf_banked_el1_test.S", [], "pass"),
     ("gxf_banked_el1 (negative control)", "gxf_banked_el1_test.S", ["-DNEGATIVE_CONTROL"], ("mismatch", 31)),
 ]
+
+# Guest FP on the host FPU (-accel tcg,native-fp=on, docs/NATIVE-FP.md).
+# fp_native_check.S embeds the softfloat hash; it must come out the same
+# with native-fp off and on. The host self-test must catch an injected
+# native fault (the run then falls back to softfloat and still PASSes), and
+# with the self-test skipped the injected fault must change the hash (FAIL at
+# check 1): together they show both guards detect a wrong native result.
+# Where the host is not AArch64 native-fp is unavailable and the fault
+# controls are skipped. A further check (AArch64 hosts) runs the same code
+# natively and compares with the embedded hash.
+IS_AARCH64_HOST = platform.machine().lower() in ("arm64", "aarch64")
+NATIVE_ON_MSG = "native-fp: on (host self-test passed" if IS_AARCH64_HOST else "native-fp: not available"
+FP_TESTS = []
+for _variant, _flags in (("", []), (", sticky FPSR", ["-DSTICKY"])):
+    FP_TESTS += [
+        (f"fp_native_check{_variant}, native-fp=off", "fp_native_check.S", _flags, "pass", {}),
+        (f"fp_native_check{_variant}, native-fp=on", "fp_native_check.S", _flags, "pass",
+         {"accel": "native-fp=on", "need": NATIVE_ON_MSG}),
+        (f"fp_native_check{_variant} (negative control: injected fault, self-test catches it)",
+         "fp_native_check.S", _flags, "pass",
+         {"accel": "native-fp=on,x-native-fp-fault=on", "need": "native-fp: host self-test failed",
+          "aarch64_only": True}),
+        (f"fp_native_check{_variant} (negative control: injected fault, self-test skipped)",
+         "fp_native_check.S", _flags, ("mismatch", 1),
+         {"accel": "native-fp=on,x-native-fp-fault=on,x-native-fp-selftest=off", "aarch64_only": True}),
+    ]
 
 
 def extract_text(obj_path):
@@ -83,8 +110,10 @@ def build(src, flags, workdir, tag):
     return img
 
 
-def run(qemu, img):
+def run(qemu, img, accel=None):
     cmd = [qemu, "-M", "a13-test", "-display", "none", "-monitor", "none", "-serial", "none", "-kernel", img]
+    if accel:
+        cmd += ["-accel", "tcg," + accel]
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=TIMEOUT)
     except subprocess.TimeoutExpired as e:
@@ -125,17 +154,62 @@ def main():
         return 2
     qemu = sys.argv[1]
     failures = 0
+    tests = [t + ({},) for t in TESTS] + FP_TESTS
+    total = skipped = 0
     with tempfile.TemporaryDirectory() as workdir:
-        for i, (name, src, flags, expect) in enumerate(TESTS):
+        for i, (name, src, flags, expect, opts) in enumerate(tests):
+            if opts.get("aarch64_only") and not IS_AARCH64_HOST:
+                print(f"skip {name}: host is not AArch64")
+                skipped += 1
+                continue
+            total += 1
             img = build(src, flags, workdir, f"t{i}")
-            code, out = run(qemu, img)
+            code, out = run(qemu, img, opts.get("accel"))
             ok, why = judge(expect, code, out)
+            if ok and opts.get("need") and opts["need"] not in out:
+                ok, why = False, f"{why}, but QEMU did not report '{opts['need']}'"
             print(f"{'ok  ' if ok else 'FAIL'} {name}: {why}")
             if not ok:
                 failures += 1
                 print("  qemu output:\n    " + "\n    ".join(out.strip().splitlines() or ["(none)"]))
-    print(f"{len(TESTS) - failures}/{len(TESTS)} passed")
+        if IS_AARCH64_HOST:
+            for variant, flags in (("", []), (", sticky FPSR", ["-DSTICKY"])):
+                total += 1
+                ok, why = host_reference(flags, workdir)
+                print(f"{'ok  ' if ok else 'FAIL'} fp_native_check{variant} on the host CPU (no QEMU): {why}")
+                failures += 0 if ok else 1
+        else:
+            print("skip fp_native_check on the host CPU: host is not AArch64")
+            skipped += 1
+    print(f"{total - failures}/{total} passed" + (f", {skipped} skipped" if skipped else ""))
     return 1 if failures else 0
+
+
+def host_reference(flags, workdir):
+    """Run fp_native_check's instruction sequence natively (HOST_HARNESS) and
+    compare its hash with the one embedded for QEMU: a third reference
+    besides softfloat and native-fp."""
+    src = os.path.join(HERE, "fp_native_check.S")
+    with open(src) as f:
+        text = f.read()
+    m = re.search(r"#ifdef STICKY.*?GOLDEN\s+(0x[0-9a-f]+).*?#else.*?GOLDEN\s+(0x[0-9a-f]+)", text, re.S)
+    golden = int(m.group(1 if flags else 2), 16)
+    cc = os.environ.get("HOST_CC", "cc")
+    obj = os.path.join(workdir, "fpc_host.o")
+    exe = os.path.join(workdir, "fpc_host")
+    main_c = os.path.join(workdir, "fpc_host_main.c")
+    with open(main_c, "w") as f:
+        f.write("#include <stdio.h>\n#include <stdint.h>\nuint64_t fpc_run(void);\n"
+                "int main(void) { printf(\"%016llx\\n\", (unsigned long long)fpc_run()); return 0; }\n")
+    try:
+        subprocess.run([cc, "-c", "-x", "assembler-with-cpp", "-DHOST_HARNESS", *flags, src, "-o", obj], check=True)
+        subprocess.run([cc, main_c, obj, "-o", exe], check=True)
+        got = int(subprocess.run([exe], stdout=subprocess.PIPE, check=True, timeout=TIMEOUT).stdout, 16)
+    except (subprocess.SubprocessError, ValueError, OSError) as e:
+        return False, f"could not run the host harness: {e}"
+    if got != golden:
+        return False, f"host CPU hash {got:016x} != embedded softfloat hash {golden:016x}"
+    return True, f"host CPU hash {got:016x} matches"
 
 
 if __name__ == "__main__":
