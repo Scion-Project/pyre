@@ -1,7 +1,7 @@
 # ASID TLB contexts: no TLB refill on every address-space switch
 
 Status: implemented (`-accel tcg,asid-tlbs=N`, default 8; `x-asid-jc`,
-default on). This is item 3 of [SAME-ISA-FASTPATH.md](SAME-ISA-FASTPATH.md).
+default off since the full-boot measurement below; it was on). This is item 3 of [SAME-ISA-FASTPATH.md](SAME-ISA-FASTPATH.md).
 
 ## The cost
 
@@ -124,6 +124,36 @@ host CPU 11.96 s; TLBs 13.83 s, 12.03 s; TLBs + jump caches 13.68 s,
 milestones reached in every run, no panic in the 50 boots with contexts on
 (the `Kernel data abort at pc 0xfffffff0099126d4` panic seen about once in
 40-50 boots also happens on unmodified master).
+
+### Full iOS 14 boot: kept-aside jump caches cost more than they save
+
+The phone's UI workload (a full iOS 14.0 boot, not restore mode) showed
+the indirect-branch lookup as the top QEMU cost: on a Pixel 10,
+`qht_lookup_custom` 10.7% and the jump-cache probe in `tcg_lookup_tb_ptr`
+9.3% of the process's CPU. Counting jump-cache misses in the same boot
+(the phone's VM, `-smp 4`, `-snapshot`, macOS host on the Mac mini, first
+150 s, counters in a debug build) gives:
+
+| 150 s of full boot | runs | jump-cache hit rate | misses (`tb_lookup`) | of which empty slot | of which another TB in the slot | lookups done |
+|---|---|---|---|---|---|---|
+| x-asid-jc=on (old default) | 3 | 93.5–93.6% | 186–187M | 96M | 63–65M | 2.44–2.49G |
+| x-asid-jc=off (new default) | 4 | 95.3–96.0% | 148–160M | 21–23M | 99–108M | 2.60–3.21G |
+| asid-tlbs=0 | 1 | 95.6% | 153M | 22M | 102M | 2.77G |
+
+About 390k ASID switches in 150 s across dozens of processes, more than
+the 8 slots: a swapped-in jump cache is mostly cold or stale, and it only
+holds the kernel paths that ran while its address space was live, where
+the single live cache keeps the kernel's entries across switches (they are
+global, so `tb_jmp_cache_clear_asid_tagged()` keeps them). Without the
+kept-aside caches the empty-slot misses drop 4x and the guest gets further
+in the same time (`lookups done` is the number of guest indirect branches
+taken in 150 s; the disk's 131st transaction comes at 66–77 s instead of
+83–85 s). One of the four runs with the old default hit a SEP panic at
+11.9 s; none of the seven with it off did (too few to blame either).
+
+The TLB contexts themselves stay on: they don't show up in these counts
+and still save the TLB refills. `x-asid-jc=on` keeps the jump caches
+for KPTI-style workloads with few address spaces (w9, Linux `sys` above).
 
 ## Tests
 

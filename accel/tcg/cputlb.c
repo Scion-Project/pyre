@@ -1109,7 +1109,7 @@ void tlb_reset_dirty(CPUState* cpu, uintptr_t start, uintptr_t length)
  * and a full flush that clears the bit also drops the index from the slots),
  * so flush_all_helper() never skips a vCPU whose slots need the flush.
  *
- * Jump caches (x-asid-jc, default on): a slot also keeps the jump cache of
+ * Jump caches (x-asid-jc, default off): a slot also keeps the jump cache of
  * its address space, swapped with the live one when the TLBs are restored
  * (pointer swap; a switch that restores nothing clears the ASID-tagged jump
  * cache entries as tlb_flush_asid_tagged_by_mmuidx() does). A jump cache
@@ -1128,7 +1128,7 @@ void tlb_reset_dirty(CPUState* cpu, uintptr_t start, uintptr_t length)
 #define TLB_CTX_MAX_COPY_ENTRIES (1 << 12)
 
 static unsigned tlb_ctx_nslots = TLB_ASID_CTX_DEFAULT_SLOTS;
-static bool     tlb_ctx_jc     = true;
+static bool     tlb_ctx_jc     = false;
 
 void tlb_asid_ctx_set_jc(bool on) { tlb_ctx_jc = on; }
 
