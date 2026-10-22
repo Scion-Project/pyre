@@ -1166,13 +1166,39 @@ static inline bool native_fp_ok(const float_status* s)
            s->float_3nan_prop_rule == float_3nan_prop_s_cab && s->tininess_before_rounding;
 }
 
-static inline void native_fp_begin(void) { asm volatile("msr fpsr, xzr" ::: "memory"); }
+/* FPSR cumulative bits (IOC, DZC, OFC, UFC, IXC) the guest status already has. */
+static inline uint64_t native_fp_have(const float_status* s)
+{
+    int f = get_float_exception_flags(s);
+    return ((f & float_flag_invalid) ? 1 : 0) | ((f & float_flag_divbyzero) ? 2 : 0) |
+           ((f & float_flag_overflow) ? 4 : 0) | ((f & float_flag_underflow) ? 8 : 0) |
+           ((f & float_flag_inexact) ? 16 : 0);
+}
 
-static inline void native_fp_end(float_status* s)
+/*
+ * Writing FPSR is slow on some cores (it more than doubled the cost of a
+ * float32 FMLA helper on Apple M1), so only clear it when it holds a flag
+ * the guest status does not have yet; otherwise the flags raised by the
+ * native operation are exactly the bits that appear (post & ~pre), and bits
+ * already set before are already in the guest status.
+ */
+static inline uint64_t native_fp_begin(const float_status* s)
+{
+    uint64_t fpsr;
+    asm volatile("mrs %0, fpsr" : "=r"(fpsr)::"memory");
+    if (fpsr & 0x1f & ~native_fp_have(s)) {
+        asm volatile("msr fpsr, xzr" ::: "memory");
+        fpsr = 0;
+    }
+    return fpsr & 0x1f;
+}
+
+static inline void native_fp_end(float_status* s, uint64_t pre)
 {
     uint64_t fpsr;
     int      f = 0;
     asm volatile("mrs %0, fpsr" : "=r"(fpsr)::"memory");
+    fpsr &= ~pre;
     if (fpsr & 1) { f |= float_flag_invalid; }
     if (fpsr & 2) { f |= float_flag_divbyzero; }
     if (fpsr & 4) { f |= float_flag_overflow; }
@@ -1187,9 +1213,9 @@ static inline void native_fp_end(float_status* s)
         intptr_t i, oprsz = simd_oprsz(desc);                                                        \
         CTYPE *  d = vd, *n = vn, *m = vm;                                                           \
         if (!native_fp_ok(stat)) { return false; }                                                   \
-        native_fp_begin();                                                                           \
+        uint64_t _pre = native_fp_begin(stat);                                                       \
         for (i = 0; i < oprsz / sizeof(CTYPE); i++) { d[i] = EXPR; }                                 \
-        native_fp_end(stat);                                                                         \
+        native_fp_end(stat, _pre);                                                                   \
         clear_tail(d, oprsz, simd_maxsz(desc));                                                      \
         return true;                                                                                 \
     }
