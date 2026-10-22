@@ -218,6 +218,16 @@ static void tb_jmp_cache_clear_asid_tagged(CPUState* cpu)
  * high), since otherwise we are likely to have a significant amount of
  * conflict misses.
  */
+static unsigned tlb_floor_bits = TLB_FLOOR_BITS_DEFAULT;
+
+void tlb_set_floor_bits(unsigned bits) { tlb_floor_bits = bits; }
+
+/* log2 of the smallest size the dynamic sizing picks, and of a new TLB. */
+static inline unsigned tlb_dyn_floor_bits(void)
+{
+    return MIN(MAX(tlb_floor_bits, CPU_TLB_DYN_MIN_BITS), CPU_TLB_DYN_MAX_BITS);
+}
+
 static size_t tlb_mmu_resize_size(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_t now)
 {
     size_t  old_size = tlb_n_entries(fast);
@@ -248,7 +258,7 @@ static size_t tlb_mmu_resize_size(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_
          * we consider that the size is appropriate.)
          */
         if (expected_rate > 70) { ceil *= 2; }
-        new_size = MAX(ceil, 1 << CPU_TLB_DYN_MIN_BITS);
+        new_size = MAX(ceil, 1 << tlb_dyn_floor_bits());
     }
 
     if (new_size == old_size && window_expired) { tlb_window_reset(desc, now, desc->n_used_entries); }
@@ -313,7 +323,7 @@ static void tlb_flush_one_mmuidx_locked(CPUState* cpu, int mmu_idx, int64_t now)
 
 static void tlb_mmu_init(CPUTLBDesc* desc, CPUTLBDescFast* fast, int64_t now)
 {
-    size_t n_entries = 1 << CPU_TLB_DYN_DEFAULT_BITS;
+    size_t n_entries = 1 << MAX(CPU_TLB_DYN_DEFAULT_BITS, tlb_dyn_floor_bits());
 
     tlb_window_reset(desc, now, 0);
     desc->n_used_entries = 0;
@@ -1003,11 +1013,20 @@ void tlb_unprotect_code(ram_addr_t ram_addr) { cpu_physical_memory_set_dirty_fla
  *
  * Called with tlb_c.lock held.
  */
-static void tlb_reset_dirty_range_locked(CPUTLBEntryFull* full, CPUTLBEntry* ent, uintptr_t start, uintptr_t length)
+static inline void tlb_reset_dirty_range_locked(CPUTLBEntryFull* full, CPUTLBEntry* ent, uintptr_t start,
+                                                uintptr_t length)
 {
     const uintptr_t addr  = ent->addr_write;
-    int             flags = addr | full->slow_flags[MMU_DATA_STORE];
+    int             flags = addr;
 
+    /*
+     * Most entries are empty or not writable (TLB_INVALID_MASK): decide from
+     * the entry alone, and only read the much larger CPUTLBEntryFull when the
+     * entry has slow flags (tlb_set_compare sets TLB_FORCE_SLOW whenever it
+     * stores any).
+     */
+    if (flags & TLB_INVALID_MASK) { return; }
+    if (flags & TLB_FORCE_SLOW) { flags |= full->slow_flags[MMU_DATA_STORE]; }
     flags &= TLB_INVALID_MASK | TLB_MMIO | TLB_DISCARD_WRITE | TLB_NOTDIRTY;
     if (flags == 0) {
         uintptr_t host = (addr & TARGET_PAGE_MASK) + ent->addend;
@@ -1028,11 +1047,20 @@ static inline void copy_tlb_helper_locked(CPUTLBEntry* d, const CPUTLBEntry* s) 
  */
 void tlb_reset_dirty(CPUState* cpu, uintptr_t start, uintptr_t length)
 {
-    int mmu_idx;
+    MMUIdxMap work;
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
-    for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
-        CPUTLBDesc*     desc = &cpu->neg.tlb.d[mmu_idx];
+    /*
+     * Only indexes filled since their last flush can hold entries: the owner
+     * sets their tlb_c.dirty bit (tlb_mark_dirty) before it computes or
+     * stores an entry, as flush elision already relies on. A fill racing
+     * with this scan is no different from one that sets its bit just after
+     * it: either way its write flags come from the dirty bitmap the caller
+     * has already updated.
+     */
+    for (work = qatomic_read(&cpu->neg.tlb.c.dirty); work != 0; work &= work - 1) {
+        int             mmu_idx = ctz32(work);
+        CPUTLBDesc*     desc    = &cpu->neg.tlb.d[mmu_idx];
         CPUTLBDescFast* fast = cpu_tlb_fast(cpu, mmu_idx);
         unsigned int    n    = tlb_n_entries(fast);
         unsigned int    i;
