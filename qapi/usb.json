@@ -19,7 +19,11 @@
 # @virtualhere: a VirtualHere-protocol server, which exports the device
 #     to clients that connect in.
 #
+# @net: an in-process USB host that switches an Apple device to its
+#     CDC-NCM mode and bridges that Ethernet link to the -netdev whose id
+#     is given as the uplink address.  (Since 10.1)
+#
 # Since: 10.0
 ##
 { 'enum': 'USBUplinkType',
-  'data': [ 'inferno', 'virtualhere' ] }
+  'data': [ 'inferno', 'virtualhere', 'net' ] }

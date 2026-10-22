@@ -23,7 +23,7 @@ elif avahi.found() and avahi_glib.found()
   mdns_deps += [avahi, avahi_glib]
 endif
 system_ss.add(when: 'CONFIG_USB_UPLINK', if_true: [lz4_dep, mdns_deps,
-  files('dev-inferno-remote.c', 'hcd-inferno.c', 'usb-uplink.c', 'hcd-virtualhere.c', 'mdns.c')])
+  files('dev-inferno-remote.c', 'hcd-inferno.c', 'usb-uplink.c', 'hcd-virtualhere.c', 'hcd-net.c', 'mdns.c')])
 
 # usb host adapters
 system_ss.add(when: 'CONFIG_USB_EHCI', if_true: files('hcd-ehci.c'))
