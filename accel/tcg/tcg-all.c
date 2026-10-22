@@ -36,6 +36,7 @@
 #include "qemu/target-info.h"
 #include "hw/boards.h"
 #include "exec/tb-flush.h"
+#include "exec/cputlb.h"
 #include "system/runstate.h"
 #include "accel/accel-ops.h"
 #include "accel/accel-cpu-ops.h"
@@ -50,6 +51,7 @@ struct TCGState
     bool          one_insn_per_tb;
     int           splitwx_enabled;
     unsigned long tb_size;
+    uint32_t      asid_tlbs;
 };
 typedef struct TCGState TCGState;
 
@@ -73,6 +75,7 @@ static void tcg_accel_instance_init(Object* obj)
 #else
     s->splitwx_enabled = 0;
 #endif
+    s->asid_tlbs = TLB_ASID_CTX_DEFAULT_SLOTS;
 }
 
 bool one_insn_per_tb;
@@ -177,6 +180,27 @@ static void tcg_set_tb_size(Object* obj, Visitor* v, const char* name, void* opa
     s->tb_size = value;
 }
 
+static void tcg_get_asid_tlbs(Object* obj, Visitor* v, const char* name, void* opaque, Error** errp)
+{
+    TCGState* s = TCG_STATE(obj);
+
+    visit_type_uint32(v, name, &s->asid_tlbs, errp);
+}
+
+static void tcg_set_asid_tlbs(Object* obj, Visitor* v, const char* name, void* opaque, Error** errp)
+{
+    TCGState* s = TCG_STATE(obj);
+    uint32_t  value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) { return; }
+    if (value > TLB_ASID_CTX_MAX_SLOTS) {
+        error_setg(errp, "asid-tlbs must be between 0 and %d", TLB_ASID_CTX_MAX_SLOTS);
+        return;
+    }
+    s->asid_tlbs = value;
+    tlb_asid_ctx_set_slots(value);
+}
+
 static bool tcg_get_splitwx(Object* obj, Error** errp)
 {
     TCGState* s = TCG_STATE(obj);
@@ -230,6 +254,10 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
 
     object_class_property_add(oc, "tb-size", "int", tcg_get_tb_size, tcg_set_tb_size, NULL, NULL);
     object_class_property_set_description(oc, "tb-size", "TCG translation block cache size");
+
+    object_class_property_add(oc, "asid-tlbs", "uint32", tcg_get_asid_tlbs, tcg_set_asid_tlbs, NULL, NULL);
+    object_class_property_set_description(oc, "asid-tlbs",
+                                          "TLBs of recently left address spaces kept per vCPU (0 disables)");
 
     object_class_property_add_bool(oc, "split-wx", tcg_get_splitwx, tcg_set_splitwx);
     object_class_property_set_description(oc, "split-wx", "Map jit pages into separate RW and RX regions");
