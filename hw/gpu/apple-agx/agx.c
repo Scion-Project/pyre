@@ -166,6 +166,20 @@ static const MemoryRegionOps agx_asc_wrap_ops = {
 /* ------------------------------------------------------------------ */
 /* Firmware endpoints. */
 
+/*
+ * M0 status / M1 handoff (observed on the iOS 14.8 / 18H17 research build):
+ * the AGXAcceleratorG12P_B0 personality matches and starts, reads the sgx
+ * ID registers above, and the device-tree/UAT/PPL gating is satisfied, so
+ * the boot reaches "waiting for host". AGXFirmware config setup then runs
+ * BEFORE any mailbox traffic: it allocates an AGXFirmware/GART object
+ * (stored at accelerator+0x3a0) and an init on it currently fails, so the
+ * driver releases the half-built object, whose destructor calls
+ * lck_mtx_destroy on an uninitialised mutex ("Destroying invalid mutex").
+ * Hence agx_ep_firmware/agx_ep_doorbell below are not reached yet: the
+ * driver never sends MSG_INIT. Finishing M0 means answering that GART/
+ * AGXFirmware bring-up (likely initdata/UAT-layout dependent) so the
+ * driver proceeds to the EP_FIRMWARE handshake these handlers implement.
+ */
 static void agx_ep_firmware(void* opaque, uint8_t ep, uint64_t msg)
 {
     AppleAGXState* s = opaque;
