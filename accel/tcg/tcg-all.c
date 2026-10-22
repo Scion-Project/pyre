@@ -53,6 +53,7 @@ struct TCGState
     unsigned long tb_size;
     uint32_t      asid_tlbs;
     bool          asid_jc;
+    uint32_t      tlb_bits;
 };
 typedef struct TCGState TCGState;
 
@@ -78,6 +79,7 @@ static void tcg_accel_instance_init(Object* obj)
 #endif
     s->asid_tlbs = TLB_ASID_CTX_DEFAULT_SLOTS;
     s->asid_jc   = true;
+    s->tlb_bits  = TLB_FLOOR_BITS_DEFAULT;
 }
 
 bool one_insn_per_tb;
@@ -204,6 +206,27 @@ static void tcg_set_asid_tlbs(Object* obj, Visitor* v, const char* name, void* o
     tlb_asid_ctx_set_slots(value);
 }
 
+static void tcg_get_tlb_bits(Object* obj, Visitor* v, const char* name, void* opaque, Error** errp)
+{
+    TCGState* s = TCG_STATE(obj);
+
+    visit_type_uint32(v, name, &s->tlb_bits, errp);
+}
+
+static void tcg_set_tlb_bits(Object* obj, Visitor* v, const char* name, void* opaque, Error** errp)
+{
+    TCGState* s = TCG_STATE(obj);
+    uint32_t  value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) { return; }
+    if (value < 6 || value > 16) {
+        error_setg(errp, "x-tlb-bits must be between 6 and 16");
+        return;
+    }
+    s->tlb_bits = value;
+    tlb_set_floor_bits(value);
+}
+
 static bool tcg_get_asid_jc(Object* obj, Error** errp)
 {
     TCGState* s = TCG_STATE(obj);
@@ -278,6 +301,10 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
     object_class_property_add(oc, "asid-tlbs", "uint32", tcg_get_asid_tlbs, tcg_set_asid_tlbs, NULL, NULL);
     object_class_property_set_description(oc, "asid-tlbs",
                                           "TLBs of recently left address spaces kept per vCPU (0 disables)");
+
+    object_class_property_add(oc, "x-tlb-bits", "uint32", tcg_get_tlb_bits, tcg_set_tlb_bits, NULL, NULL);
+    object_class_property_set_description(oc, "x-tlb-bits",
+                                          "log2 of the smallest softmmu TLB size per MMU mode (default 10)");
 
     object_class_property_add_bool(oc, "x-asid-jc", tcg_get_asid_jc, tcg_set_asid_jc);
     object_class_property_set_description(oc, "x-asid-jc", "Keep jump caches with the asid-tlbs TLBs (default on)");
