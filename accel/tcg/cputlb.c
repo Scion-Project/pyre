@@ -132,11 +132,10 @@ static void tlb_window_reset(CPUTLBDesc* desc, int64_t ns, size_t max_entries)
  * comparing the low @bits of the address. Other pages that share the group
  * keep their entries: their mappings are not affected by this flush.
  */
-static void tb_jmp_cache_clear_page(CPUState* cpu, vaddr page_addr, unsigned bits)
+static void tb_jmp_cache_clear_page_jc(CPUJumpCache* jc, vaddr page_addr, unsigned bits)
 {
-    CPUJumpCache* jc   = cpu->tb_jmp_cache;
-    vaddr         mask = TARGET_PAGE_MASK & (bits < 64 ? MAKE_64BIT_MASK(0, bits) : -1);
-    int           i, i0;
+    vaddr mask = TARGET_PAGE_MASK & (bits < 64 ? MAKE_64BIT_MASK(0, bits) : -1);
+    int   i, i0;
 
     if (unlikely(!jc)) { return; }
 
@@ -144,6 +143,14 @@ static void tb_jmp_cache_clear_page(CPUState* cpu, vaddr page_addr, unsigned bit
     for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
         if (((jc->array[i0 + i].pc ^ page_addr) & mask) == 0) { qatomic_set(&jc->array[i0 + i].tb, NULL); }
     }
+}
+
+static void tlb_ctx_jc_clear_page(CPUState* cpu, vaddr page_addr, unsigned bits);
+
+static void tb_jmp_cache_clear_page(CPUState* cpu, vaddr page_addr, unsigned bits)
+{
+    tb_jmp_cache_clear_page_jc(cpu->tb_jmp_cache, page_addr, bits);
+    tlb_ctx_jc_clear_page(cpu, page_addr, bits);
 }
 
 /*
@@ -1074,8 +1081,18 @@ void tlb_reset_dirty(CPUState* cpu, uintptr_t start, uintptr_t length)
  * and a full flush that clears the bit also drops the index from the slots),
  * so flush_all_helper() never skips a vCPU whose slots need the flush.
  *
- * The jump cache is not kept aside: a switch clears its ASID-tagged entries
- * exactly as tlb_flush_asid_tagged_by_mmuidx() does.
+ * Jump caches (x-asid-jc, default on): a slot also keeps the jump cache of
+ * its address space, swapped with the live one when the TLBs are restored
+ * (pointer swap; a switch that restores nothing clears the ASID-tagged jump
+ * cache entries as tlb_flush_asid_tagged_by_mmuidx() does). A jump cache
+ * entry maps a virtual PC to a TB under the mappings of its address space,
+ * so a kept-aside one gets the same invalidations as the TLBs: page and
+ * range flushes clear its entries for the flushed pages
+ * (tlb_ctx_jc_clear_page), and anything that clears the live jump cache as
+ * a whole - full TLB flushes, tb_flush (TB memory is reused), reset - marks
+ * all kept-aside ones stale (tlb_asid_ctx_jc_invalidate); so does dropping
+ * an mmu index from a slot. TB invalidation needs nothing: a lookup never
+ * accepts a TB with CF_INVALID, and TBs are only reused after tb_flush.
  */
 #define TLB_CTX_MAX_SLOTS TLB_ASID_CTX_MAX_SLOTS
 /* At most this many mmu indexes per switch, and per-index TLBs no bigger than this are copied. */
@@ -1083,6 +1100,9 @@ void tlb_reset_dirty(CPUState* cpu, uintptr_t start, uintptr_t length)
 #define TLB_CTX_MAX_COPY_ENTRIES (1 << 12)
 
 static unsigned tlb_ctx_nslots = TLB_ASID_CTX_DEFAULT_SLOTS;
+static bool     tlb_ctx_jc     = true;
+
+void tlb_asid_ctx_set_jc(bool on) { tlb_ctx_jc = on; }
 
 typedef struct TLBCtxSlot
 {
@@ -1094,6 +1114,14 @@ typedef struct TLBCtxSlot
     uint64_t       lru;
     CPUTLBDesc     d[TLB_CTX_MAX_IDX];
     CPUTLBDescFast f[TLB_CTX_MAX_IDX];
+    /*
+     * The address space's jump cache, swapped with the live one together
+     * with the TLBs. Once allocated it is only freed with the vCPU (another
+     * thread clearing an invalidated TB's slots may still be reading it);
+     * jc_valid says whether it may be swapped in as is.
+     */
+    CPUJumpCache* jc;
+    bool          jc_valid;
 } TLBCtxSlot;
 
 struct TLBCtxCache
@@ -1126,7 +1154,8 @@ static void tlb_ctx_free_idx(TLBCtxSlot* s, int midx)
 static void tlb_ctx_free_slot(TLBCtxSlot* s)
 {
     for (MMUIdxMap work = s->have; work != 0; work &= work - 1) { tlb_ctx_free_idx(s, ctz32(work)); }
-    s->mask = 0;
+    s->mask     = 0;
+    s->jc_valid = false;
 }
 
 static void tlb_ctx_update_held(struct TLBCtxCache* c)
@@ -1144,6 +1173,7 @@ static void tlb_ctx_drop_locked(CPUState* cpu, MMUIdxMap idxmap)
     for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
         TLBCtxSlot* s = &c->slot[i];
 
+        if (s->have & idxmap) { s->jc_valid = false; }
         for (MMUIdxMap work = s->have & idxmap; work != 0; work &= work - 1) { tlb_ctx_free_idx(s, ctz32(work)); }
     }
     tlb_ctx_update_held(c);
@@ -1212,7 +1242,10 @@ static void tlb_ctx_destroy(CPUState* cpu)
     struct TLBCtxCache* c = cpu->tlb_ctx;
 
     if (c == NULL) { return; }
-    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) { tlb_ctx_free_slot(&c->slot[i]); }
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
+        tlb_ctx_free_slot(&c->slot[i]);
+        if (c->slot[i].jc) { g_free_rcu(c->slot[i].jc, rcu); }
+    }
     g_free(c);
     cpu->tlb_ctx = NULL;
 }
@@ -1264,6 +1297,7 @@ void tlb_switch_asid_ctx(CPUState* cpu, MMUIdxMap idxmap, const TLBCtxKey* old_k
     struct TLBCtxCache* c;
     TLBCtxSlot *        hit = NULL, *victim = NULL;
     MMUIdxMap           live, restored = 0;
+    bool                jc_swapped = false;
     int64_t             now;
     unsigned            i;
 
@@ -1344,6 +1378,26 @@ void tlb_switch_asid_ctx(CPUState* cpu, MMUIdxMap idxmap, const TLBCtxKey* old_k
                 if (!tlb_ctx_resize_live(cpu, midx, now)) { tlb_flush_asid_tagged_locked(cpu, midx); }
             }
         }
+        if (tlb_ctx_jc && hit->have) {
+            /*
+             * The incoming address space's jump cache comes back with its
+             * TLBs; the outgoing one is kept with the outgoing TLBs.
+             */
+            CPUJumpCache* in = hit->jc;
+
+            if (in == NULL) { in = g_new0(CPUJumpCache, 1); }
+            else if (!hit->jc_valid) {
+                for (size_t k = 0; k < TB_JMP_CACHE_SIZE; k++) { in->array[k].tb = NULL; }
+                memset(in->asid_tagged, 0, sizeof(in->asid_tagged));
+            }
+            hit->jc       = cpu->tb_jmp_cache;
+            hit->jc_valid = true;
+            qatomic_set(&cpu->tb_jmp_cache, in);
+            jc_swapped = true;
+        }
+        else {
+            hit->jc_valid = false;
+        }
         hit->key  = *old_key;
         hit->mask = hit->have ? idxmap : 0;
         hit->lru  = ++c->clock;
@@ -1363,6 +1417,7 @@ void tlb_switch_asid_ctx(CPUState* cpu, MMUIdxMap idxmap, const TLBCtxKey* old_k
             }
             if (!tlb_ctx_resize_live(cpu, midx, now)) { tlb_flush_asid_tagged_locked(cpu, midx); }
         }
+        if (victim) { victim->jc_valid = false; }
         if (victim && victim->have) {
             victim->key  = *old_key;
             victim->mask = idxmap;
@@ -1374,7 +1429,30 @@ void tlb_switch_asid_ctx(CPUState* cpu, MMUIdxMap idxmap, const TLBCtxKey* old_k
 
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
-    if (live != 0) { tb_jmp_cache_clear_asid_tagged(cpu); }
+    if (live != 0 && !jc_swapped) { tb_jmp_cache_clear_asid_tagged(cpu); }
+}
+
+/* Called on @cpu's thread after a page or range flush cleared its live jump cache. */
+static void tlb_ctx_jc_clear_page(CPUState* cpu, vaddr page_addr, unsigned bits)
+{
+    struct TLBCtxCache* c = cpu->tlb_ctx;
+
+    if (likely(c == NULL)) { return; }
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
+        if (c->slot[i].jc_valid) { tb_jmp_cache_clear_page_jc(c->slot[i].jc, page_addr, bits); }
+    }
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+
+void tlb_asid_ctx_jc_invalidate(CPUState* cpu)
+{
+    struct TLBCtxCache* c = cpu->tlb_ctx;
+
+    if (likely(c == NULL)) { return; }
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) { c->slot[i].jc_valid = false; }
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 }
 
 /* Called with tlb_c.lock held */

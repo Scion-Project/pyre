@@ -23,6 +23,7 @@
 #include "tcg/tcg.h"
 #include "tb-internal.h"
 #include "exec/tb-flush.h"
+#include "exec/cputlb.h"
 #include "qemu/cacheinfo.h"
 #include "qemu/target-info.h"
 #include "exec/log.h"
@@ -508,4 +509,5 @@ void tcg_flush_jmp_cache(CPUState* cpu)
     if (unlikely(jc == NULL)) { return; }
 
     for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) { qatomic_set(&jc->array[i].tb, NULL); }
+    tlb_asid_ctx_jc_invalidate(cpu);
 }
