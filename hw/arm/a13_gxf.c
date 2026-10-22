@@ -94,7 +94,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_override_reginfo[] = {
         .crn             = 13,
         .crm             = 0,
         .access          = PL1_RW,
-        .type            = ARM_CP_OVERRIDE,
+        .type            = ARM_CP_OVERRIDE | ARM_CP_SUPPRESS_TB_END,
         .gxf_fieldoffset = offsetof(CPUARMState, gxf.tpidr_gl[1]),
         .raw_readfn      = raw_read,
         .raw_writefn     = raw_write,
@@ -121,7 +121,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_override_reginfo[] = {
     {
         .name            = "SPSR_EL1",
         .state           = ARM_CP_STATE_AA64,
-        .type            = ARM_CP_ALIAS | ARM_CP_OVERRIDE,
+        .type            = ARM_CP_ALIAS | ARM_CP_OVERRIDE | ARM_CP_SUPPRESS_TB_END,
         .opc0            = 3,
         .opc1            = 0,
         .crn             = 4,
@@ -137,7 +137,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_override_reginfo[] = {
     {
         .name            = "ELR_EL1",
         .state           = ARM_CP_STATE_AA64,
-        .type            = ARM_CP_ALIAS | ARM_CP_OVERRIDE,
+        .type            = ARM_CP_ALIAS | ARM_CP_OVERRIDE | ARM_CP_SUPPRESS_TB_END,
         .opc0            = 3,
         .opc1            = 0,
         .crn             = 4,
@@ -159,7 +159,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_override_reginfo[] = {
         .opc1            = 0,
         .opc2            = 0,
         .access          = PL1_RW,
-        .type            = ARM_CP_OVERRIDE,
+        .type            = ARM_CP_OVERRIDE | ARM_CP_SUPPRESS_TB_END,
         .accessfn        = access_tvm_trvm,
         .raw_readfn      = raw_read,
         .raw_writefn     = raw_write,
@@ -175,7 +175,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_override_reginfo[] = {
         .crm             = 0,
         .opc1            = 0,
         .opc2            = 0,
-        .type            = ARM_CP_OVERRIDE,
+        .type            = ARM_CP_OVERRIDE | ARM_CP_SUPPRESS_TB_END,
         .access          = PL1_RW,
         .accessfn        = access_tvm_trvm,
         .raw_readfn      = raw_read,
@@ -241,6 +241,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
     },
     {
         .name        = "ASPSR_GL11",
+        .type        = ARM_CP_SUPPRESS_TB_END,
         .cp          = CP_REG_ARM64_SYSREG_CP,
         .state       = ARM_CP_STATE_AA64,
         .opc0        = 3,
@@ -271,6 +272,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
     },
     {
         .name              = "TPIDR_GL11",
+        .type              = ARM_CP_SUPPRESS_TB_END,
         .cp                = CP_REG_ARM64_SYSREG_CP,
         .state             = ARM_CP_STATE_AA64,
         .opc0              = 3,
@@ -303,6 +305,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
     },
     {
         .name              = "SPSR_GL11",
+        .type              = ARM_CP_SUPPRESS_TB_END,
         .cp                = CP_REG_ARM64_SYSREG_CP,
         .state             = ARM_CP_STATE_AA64,
         .opc0              = 3,
@@ -319,6 +322,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
     },
     {
         .name              = "ESR_GL11",
+        .type              = ARM_CP_SUPPRESS_TB_END,
         .cp                = CP_REG_ARM64_SYSREG_CP,
         .state             = ARM_CP_STATE_AA64,
         .opc0              = 3,
@@ -335,6 +339,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
     },
     {
         .name              = "ELR_GL11",
+        .type              = ARM_CP_SUPPRESS_TB_END,
         .cp                = CP_REG_ARM64_SYSREG_CP,
         .state             = ARM_CP_STATE_AA64,
         .opc0              = 3,
@@ -351,6 +356,7 @@ static const ARMCPRegInfo apple_a13_gxf_cp_reginfo[] = {
     },
     {
         .name              = "FAR_GL11",
+        .type              = ARM_CP_SUPPRESS_TB_END,
         .cp                = CP_REG_ARM64_SYSREG_CP,
         .state             = ARM_CP_STATE_AA64,
         .opc0              = 3,
