@@ -76,6 +76,9 @@ static void tcg_accel_instance_init(Object* obj)
 }
 
 bool one_insn_per_tb;
+bool tcg_native_fp;
+bool tcg_native_fp_fault;
+bool tcg_native_fp_selftest = true;
 
 static int tcg_init_machine(AccelState* as, MachineState* ms)
 {
@@ -199,6 +202,13 @@ static void tcg_set_one_insn_per_tb(Object* obj, bool value, Error** errp)
     qatomic_set(&one_insn_per_tb, value);
 }
 
+static bool tcg_get_native_fp(Object* obj, Error** errp) { return tcg_native_fp; }
+static void tcg_set_native_fp(Object* obj, bool value, Error** errp) { tcg_native_fp = value; }
+static bool tcg_get_native_fp_fault(Object* obj, Error** errp) { return tcg_native_fp_fault; }
+static void tcg_set_native_fp_fault(Object* obj, bool value, Error** errp) { tcg_native_fp_fault = value; }
+static bool tcg_get_native_fp_selftest(Object* obj, Error** errp) { return tcg_native_fp_selftest; }
+static void tcg_set_native_fp_selftest(Object* obj, bool value, Error** errp) { tcg_native_fp_selftest = value; }
+
 static int tcg_gdbstub_supported_sstep_flags(AccelState* as) { return SSTEP_ENABLE | SSTEP_NOIRQ | SSTEP_NOTIMER; }
 
 static void tcg_accel_class_init(ObjectClass* oc, const void* data)
@@ -222,6 +232,17 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
 
     object_class_property_add_bool(oc, "one-insn-per-tb", tcg_get_one_insn_per_tb, tcg_set_one_insn_per_tb);
     object_class_property_set_description(oc, "one-insn-per-tb", "Only put one guest insn in each translation block");
+
+    object_class_property_add_bool(oc, "native-fp", tcg_get_native_fp, tcg_set_native_fp);
+    object_class_property_set_description(oc, "native-fp",
+                                          "Execute guest FP on the host FPU where bit-exact (same-ISA hosts, "
+                                          "see docs/NATIVE-FP.md)");
+    object_class_property_add_bool(oc, "x-native-fp-fault", tcg_get_native_fp_fault, tcg_set_native_fp_fault);
+    object_class_property_set_description(oc, "x-native-fp-fault", "Test only: inject a NaN-propagation fault");
+    object_class_property_add_bool(oc, "x-native-fp-selftest", tcg_get_native_fp_selftest,
+                                   tcg_set_native_fp_selftest);
+    object_class_property_set_description(oc, "x-native-fp-selftest",
+                                          "Test only: set off to skip the native-fp host self-test");
 }
 
 static const TypeInfo tcg_accel_type = {
