@@ -297,6 +297,15 @@ static void sit_copy(TCGContext* s, const SitInsn* si)
     if (si->nzcv & SIT_NZCV_W) { s->sit->m.nzcv = SIT_FL_DIRTY; }
 }
 
+static void sit_ldenv(TCGContext* s, const SitInsn* si)
+{
+    TCGReg rd = sit_def(s, si->rt, sit_bit(si->rt));
+
+    if (rd == TCG_REG_XZR) { return; }
+    tcg_out_ldst(s, I3312_LDRX, rd, TCG_AREG0, si->imm, 3);
+    sit_dirty(s, si->rt);
+}
+
 static void sit_addpc(TCGContext* s, const SitInsn* si)
 {
     TCGReg rd = sit_def(s, si->rt, sit_bit(si->rt));
@@ -473,6 +482,7 @@ static void tcg_out_sit(TCGContext* s, const SitInsn* si, TCGLabel* l)
     switch (si->kind) {
         case SIT_COPY : sit_copy(s, si); break;
         case SIT_ADDPC: sit_addpc(s, si); break;
+        case SIT_LDENV: sit_ldenv(s, si); break;
         case SIT_LD   :
         case SIT_ST   :
         case SIT_LDP  :

@@ -13,6 +13,8 @@
  *   4    x18, x29 and x30 as ordinary operands and load destinations
  *   5    NZCV set before a page-crossing (slow-path) load and store and
  *        consumed after them
+ *   7    MRS TPIDR_EL0 / TPIDRRO_EL0 (plain field reads) in the middle of
+ *        ALU code, after MSR TPIDR_EL0 at EL0 and TPIDRRO_EL0 set at EL1
  *   6    a store over code later in the same block (the store's slow
  *        path invalidates the TB being executed), then the architectural
  *        DC CVAU/IC IVAU/ISB sequence: registers and NZCV written before
@@ -124,6 +126,8 @@ _start:
     dsb     ish
     isb
 
+    ldr     x0, =0x7070707070707070
+    msr     tpidrro_el0, x0
     ldr     x0, =BUF
     msr     sp_el0, x0
     adr     x0, el0_main
@@ -302,6 +306,19 @@ fault2:
     CHK     x10, 0x1111, 6
     CHK     x15, 0x1111 - 0x2222, 6
     CHK     x17, 1, 6
+
+    /* 7: TLS register reads in the middle of a block */
+    LI      x0, 0x0123456789abcdef
+    msr     tpidr_el0, x0
+    movz    x1, #7
+    mrs     x2, tpidr_el0
+    add     x3, x2, x1
+    mrs     x4, tpidrro_el0
+    eor     x5, x4, x3
+    mrs     x6, tpidr_el0
+    CHK     x3, 0x0123456789abcdef + 7, 7
+    CHK     x5, 0x7070707070707070 ^ (0x0123456789abcdef + 7), 7
+    CHK     x6, 0x0123456789abcdef, 7
 
     svc     #0
 
