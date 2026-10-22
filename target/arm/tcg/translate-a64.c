@@ -420,7 +420,7 @@ static void gen_goto_tb(DisasContext* s, int n, int64_t diff)
         gen_a64_update_pc(s, diff);
         if (s->ss_active) { gen_step_complete_exception(s); }
         else {
-            tcg_gen_lookup_and_goto_ptr();
+            gen_lookup_and_goto_ptr();
             s->base.is_jmp = DISAS_NORETURN;
         }
     }
@@ -9123,7 +9123,7 @@ static void aarch64_tr_tb_stop(DisasContextBase* dcbase, CPUState* cpu)
             case DISAS_UPDATE_NOCHAIN:
                 gen_a64_update_pc(dc, 4);
                 /* fall through */
-            case DISAS_JUMP    : tcg_gen_lookup_and_goto_ptr(); break;
+            case DISAS_JUMP    : gen_lookup_and_goto_ptr(); break;
             case DISAS_NORETURN:
             case DISAS_SWI     : break;
             case DISAS_WFE:

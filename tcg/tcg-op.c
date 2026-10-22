@@ -2973,7 +2973,7 @@ void tcg_gen_goto_tb(unsigned idx)
     tcg_gen_op1i(INDEX_op_goto_tb, 0, idx);
 }
 
-void tcg_gen_lookup_and_goto_ptr(void)
+void tcg_gen_lookup_and_goto_ptr_via(void (*gen_lookup)(TCGv_ptr ret, TCGv_env env))
 {
     TCGv_ptr ptr;
 
@@ -2983,7 +2983,9 @@ void tcg_gen_lookup_and_goto_ptr(void)
     }
 
     ptr = tcg_temp_ebb_new_ptr();
-    gen_helper_lookup_tb_ptr(ptr, tcg_env);
+    gen_lookup(ptr, tcg_env);
     tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
     tcg_temp_free_ptr(ptr);
 }
+
+void tcg_gen_lookup_and_goto_ptr(void) { tcg_gen_lookup_and_goto_ptr_via(gen_helper_lookup_tb_ptr); }
