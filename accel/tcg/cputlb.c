@@ -145,7 +145,24 @@ static void tb_jmp_cache_clear_page_jc(CPUJumpCache* jc, vaddr page_addr, unsign
     }
 }
 
+/*
+ * Drop the jump cache entries for TBs that start in [@start, @start + @len),
+ * comparing the low @bits of the address. One pass over the whole cache: for
+ * a range flush that spans more pages than the cache has page groups.
+ */
+static void tb_jmp_cache_clear_range_jc(CPUJumpCache* jc, vaddr start, vaddr len, unsigned bits)
+{
+    vaddr mask = bits < 64 ? MAKE_64BIT_MASK(0, bits) : -1;
+
+    if (unlikely(!jc)) { return; }
+
+    for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
+        if (((jc->array[i].pc - start) & mask) < len) { qatomic_set(&jc->array[i].tb, NULL); }
+    }
+}
+
 static void tlb_ctx_jc_clear_page(CPUState* cpu, vaddr page_addr, unsigned bits);
+static void tlb_ctx_jc_clear_range(CPUState* cpu, vaddr start, vaddr len, unsigned bits);
 
 static void tb_jmp_cache_clear_page(CPUState* cpu, vaddr page_addr, unsigned bits)
 {
@@ -821,11 +838,22 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState* cpu, TLBFlushRangeData d
 
     /*
      * Each page clears one group of TB_JMP_PAGE_SIZE entries. Once the range
-     * covers as many pages as there are groups, clearing everything is cheaper
-     * (and clears a superset).
+     * covers as many pages as there are groups, one pass over the whole cache
+     * is cheaper. It drops only the entries in the range (plus the page before
+     * it, as below, and one after for an unaligned length). Clearing
+     * everything would also drop the kernel's entries and make every
+     * kept-aside jump cache stale, and XNU flushes ranges of 1 MiB or more
+     * (user unmaps) hundreds of times a second.
      */
     if (d.len >= TARGET_PAGE_SIZE * (TB_JMP_CACHE_SIZE / TB_JMP_PAGE_SIZE)) {
-        tcg_flush_jmp_cache(cpu);
+        vaddr start = d.addr - TARGET_PAGE_SIZE, len = ROUND_UP(d.len, TARGET_PAGE_SIZE) + 2 * TARGET_PAGE_SIZE;
+
+        if (len < d.len || (d.bits < 64 && len > MAKE_64BIT_MASK(0, d.bits))) {
+            tcg_flush_jmp_cache(cpu); /* wraps around: clear everything */
+            return;
+        }
+        tb_jmp_cache_clear_range_jc(cpu->tb_jmp_cache, start, len, d.bits);
+        tlb_ctx_jc_clear_range(cpu, start, len, d.bits);
         return;
     }
 
@@ -1116,8 +1144,8 @@ void tlb_reset_dirty(CPUState* cpu, uintptr_t start, uintptr_t length)
  * entry maps a virtual PC to a TB under the mappings of its address space,
  * so a kept-aside one gets the same invalidations as the TLBs: page and
  * range flushes clear its entries for the flushed pages
- * (tlb_ctx_jc_clear_page), and anything that clears the live jump cache as
- * a whole - full TLB flushes, tb_flush (TB memory is reused), reset - marks
+ * (tlb_ctx_jc_clear_page, tlb_ctx_jc_clear_range), and anything that
+ * clears the live jump cache as a whole - full TLB flushes, tb_flush (TB memory is reused), reset - marks
  * all kept-aside ones stale (tlb_asid_ctx_jc_invalidate); so does dropping
  * an mmu index from a slot. TB invalidation needs nothing: a lookup never
  * accepts a TB with CF_INVALID, and TBs are only reused after tb_flush.
@@ -1469,6 +1497,19 @@ static void tlb_ctx_jc_clear_page(CPUState* cpu, vaddr page_addr, unsigned bits)
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
     for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
         if (c->slot[i].jc_valid) { tb_jmp_cache_clear_page_jc(c->slot[i].jc, page_addr, bits); }
+    }
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+
+/* The same for a range, see tlb_flush_range_by_mmuidx_async_0(). */
+static void tlb_ctx_jc_clear_range(CPUState* cpu, vaddr start, vaddr len, unsigned bits)
+{
+    struct TLBCtxCache* c = cpu->tlb_ctx;
+
+    if (likely(c == NULL)) { return; }
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    for (unsigned i = 0; i < TLB_CTX_MAX_SLOTS; i++) {
+        if (c->slot[i].jc_valid) { tb_jmp_cache_clear_range_jc(c->slot[i].jc, start, len, bits); }
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 }
