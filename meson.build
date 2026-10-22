@@ -2637,6 +2637,7 @@ if have_system
     'hw/char',
     'hw/display',
     'hw/dma',
+    'hw/gpu/apple-agx',
     'hw/i2c',
     'hw/input',
     'hw/intc',

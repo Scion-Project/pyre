@@ -375,6 +375,7 @@ typedef struct
     gsize         ticket_length;
     bool          non_cold_boot;
     bool          had_autoboot;
+    bool          keep_gpu; // keep the GPU's device-tree nodes (t8030 gpu=on)
     AppleBootMode boot_mode;
 } AppleBootInfo;
 

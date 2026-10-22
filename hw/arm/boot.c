@@ -240,6 +240,19 @@ static const char* REM_PROPS[] = {
 #endif
 };
 
+/*
+ * With `-M t8030,gpu=on` the GPU's nodes stay in the device tree so the AGX
+ * kexts can match: the coprocessor (removed by name above) and the GPU
+ * itself (its compatible is not in KEEP_COMP).
+ */
+static const char* GPU_KEEP_COMP[] = {
+    "gpu,t8030\0$",
+};
+
+static const char* GPU_KEEP_NAMES[] = {
+    "gfx-asc\0$",
+};
+
 static const char* srawmemchr(const char* str, int chr)
 {
     while (*str != chr) { str++; }
@@ -249,7 +262,15 @@ static const char* srawmemchr(const char* str, int chr)
 
 static uint64_t sstrlen(const char* str) { return srawmemchr(str, '$') - str; }
 
-static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent)
+static bool apple_boot_dt_match(const AppleDTProp* prop, const char** list, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (memcmp(prop->data, list[i], MIN(prop->len, sstrlen(list[i]))) == 0) { return true; }
+    }
+    return false;
+}
+
+static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent, bool keep_gpu)
 {
     GList*       iter  = NULL;
     AppleDTNode* child = NULL;
@@ -259,8 +280,8 @@ static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent)
 
     if ((prop = apple_dt_get_prop(node, "compatible")) != NULL) {
         assert_nonnull(prop->data);
-        found = false;
-        for (i = 0; i < ARRAY_SIZE(KEEP_COMP); i++) {
+        found = keep_gpu && apple_boot_dt_match(prop, GPU_KEEP_COMP, ARRAY_SIZE(GPU_KEEP_COMP));
+        for (i = 0; !found && i < ARRAY_SIZE(KEEP_COMP); i++) {
             if (memcmp(prop->data, KEEP_COMP[i], MIN(prop->len, sstrlen(KEEP_COMP[i]))) == 0) {
                 found = true;
                 break;
@@ -275,7 +296,9 @@ static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent)
         }
     }
 
-    if ((prop = apple_dt_get_prop(node, "name")) != NULL) {
+    if ((prop = apple_dt_get_prop(node, "name")) != NULL
+        && !(keep_gpu && apple_boot_dt_match(prop, GPU_KEEP_NAMES, ARRAY_SIZE(GPU_KEEP_NAMES))))
+    {
         assert_nonnull(prop->data);
         for (i = 0; i < ARRAY_SIZE(REM_NAMES); i++) {
             uint64_t size = MIN(prop->len, sstrlen(REM_NAMES[i]));
@@ -314,7 +337,7 @@ static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent)
 
         // iter might get invalidated
         iter = iter->next;
-        apple_boot_process_dt_node(child, node);
+        apple_boot_process_dt_node(child, node, keep_gpu);
     }
 }
 
@@ -572,7 +595,7 @@ void apple_boot_populate_dt(AppleDTNode* root, AppleBootInfo* info, bool auto_bo
 
     apple_boot_init_mem_ranges(root);
 
-    apple_boot_process_dt_node(root, NULL);
+    apple_boot_process_dt_node(root, NULL, info->keep_gpu);
 
     // Prevent further additions.
     info->device_tree_size = ROUND_UP_16K(apple_dt_finalise(root));

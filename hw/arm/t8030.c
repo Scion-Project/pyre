@@ -79,6 +79,7 @@
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
+#include "hw/gpu/apple-agx.h"
 #include "arm-powerctl.h"
 
 #define PROP_VISIT_GETTER_SETTER(_type, _name)                                                           \
@@ -861,6 +862,73 @@ static void t8030_rtkit_mem_setup(AppleT8030MachineState* t8030, CarveoutAllocat
     t8030_rtkit_seg_prop_setup(iop_nub, carveout_alloc_mem(ca, size), size);
 }
 
+/*
+ * The GPU MMU (UAT) regions iBoot carves out for the GPU (`gpu=on` only).
+ * The kernel's IOUnifiedAddressTranslator maps one 16 KiB page of each:
+ * the kernel-half (TTBR1) L1 table shared with the GPU firmware, the TTBAT
+ * (the per-context TTBR table the firmware walks; its property is a page
+ * number), and the AP/firmware page-table handoff area.
+ */
+/*
+ * Add a PPL-protected I/O range to /defaults/pmap-io-ranges, as iBoot does
+ * for the UAT regions: the kernel's UAT code panics unless the page is
+ * PPL-owned (flag 0x4000) and carries the signature it expects.
+ */
+static void t8030_add_pmap_io_range(AppleT8030MachineState* t8030, hwaddr addr, uint64_t size, uint32_t sig)
+{
+    AppleDTNode* defaults;
+    AppleDTProp* prop;
+    uint8_t*     data;
+    uint32_t     len;
+    struct QEMU_PACKED
+    {
+        uint64_t addr;
+        uint64_t size;
+        uint32_t flags;
+        uint32_t sig;
+    } rgn = {cpu_to_le64(addr), cpu_to_le64(size), cpu_to_le32(0x4007), cpu_to_le32(sig)};
+
+    defaults = apple_dt_get_node(t8030->device_tree, "defaults");
+    assert_nonnull(defaults);
+    prop = apple_dt_get_prop(defaults, "pmap-io-ranges");
+    assert_nonnull(prop);
+    for (len = 0; len + sizeof(rgn) <= prop->len; len += sizeof(rgn)) {
+        if (ldq_le_p(prop->data + len) == addr) { return; } // already added (reboot)
+    }
+    data = g_malloc(prop->len + sizeof(rgn));
+    memcpy(data, prop->data, prop->len);
+    memcpy(data + prop->len, &rgn, sizeof(rgn));
+    apple_dt_set_prop(defaults, "pmap-io-ranges", prop->len + sizeof(rgn), data);
+    g_free(data);
+}
+
+static void t8030_gpu_mem_setup(AppleT8030MachineState* t8030, CarveoutAllocator* ca)
+{
+    AppleDTNode* sgx;
+    hwaddr       shared, ttbat, handoff;
+
+    sgx = apple_dt_get_node(t8030->device_tree, "arm-io/sgx");
+    assert_nonnull(sgx);
+
+    shared  = carveout_alloc_mem(ca, AGX_UAT_REGION_SIZE);
+    ttbat   = carveout_alloc_mem(ca, AGX_UAT_REGION_SIZE);
+    handoff = carveout_alloc_mem(ca, AGX_UAT_REGION_SIZE);
+    address_space_set(&address_space_memory, shared, 0, AGX_UAT_REGION_SIZE, MEMTXATTRS_UNSPECIFIED);
+    address_space_set(&address_space_memory, ttbat, 0, AGX_UAT_REGION_SIZE, MEMTXATTRS_UNSPECIFIED);
+    address_space_set(&address_space_memory, handoff, 0, AGX_UAT_REGION_SIZE, MEMTXATTRS_UNSPECIFIED);
+
+    apple_dt_set_prop_u64(sgx, "gfx-shared-region-base", shared);
+    apple_dt_set_prop_u32(sgx, "ttbat-phys-addr-base", ttbat / AGX_UAT_REGION_SIZE);
+    apple_dt_set_prop_u64(sgx, "gfx-handoff-base", handoff);
+
+    t8030_add_pmap_io_range(t8030, shared, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_UAT);
+    t8030_add_pmap_io_range(t8030, ttbat, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_UAT);
+    t8030_add_pmap_io_range(t8030, handoff, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_UAT);
+
+    apple_agx_set_uat_regions(SYS_BUS_DEVICE(object_property_get_link(OBJECT(t8030), "agx", &error_fatal)), shared,
+                              ttbat, handoff);
+}
+
 static void t8030_memory_setup(AppleT8030MachineState* t8030)
 {
     AppleDTNode*       carveout_memory_map;
@@ -899,6 +967,7 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
 
     t8030_rtkit_mem_setup(t8030, ca, "sio", "iop-sio-nub", SIO_SIZE);
     t8030_rtkit_mem_setup(t8030, ca, "ans", "iop-ans-nub", ANS_SIZE);
+    if (t8030->gpu) { t8030_gpu_mem_setup(t8030, ca); }
 
     if (t8030->sep_rom_filename) {
         if (!g_file_get_contents(t8030->sep_rom_filename, &seprom, &fsize, NULL)) {
@@ -1079,6 +1148,7 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
     apple_boot_allocate_segment_records(memory_map, hdr);
     if (t8030->sptm != NULL) { apple_sptm_allocate_memory_map(memory_map, &t8030->sptm_layout); }
 
+    info->keep_gpu = t8030->gpu;
     apple_boot_populate_dt(t8030->device_tree, info, auto_boot);
 
     switch (hdr->file_type) {
@@ -2674,6 +2744,49 @@ static void t8030_create_aop(AppleT8030MachineState* t8030)
     sysbus_realize_and_unref(aop, &error_fatal);
 }
 
+// `-M t8030,gpu=on`: the AGX GPU with its coprocessor's firmware emulated
+// (hw/gpu/apple-agx, docs/GPU-EMULATION-SCOPE.md milestone M0).
+static void t8030_create_gpu(AppleT8030MachineState* t8030)
+{
+    AppleDTNode*  armio;
+    AppleDTNode*  sgx;
+    AppleDTNode*  gfx_asc;
+    AppleDTProp*  prop;
+    uint64_t*     reg;
+    uint32_t*     ints;
+    SysBusDevice* agx;
+    uint32_t      i;
+
+    armio = apple_dt_get_node(t8030->device_tree, "arm-io");
+    assert_nonnull(armio);
+    sgx = apple_dt_get_node(armio, "sgx");
+    assert_nonnull(sgx);
+    gfx_asc = apple_dt_get_node(armio, "gfx-asc");
+    assert_nonnull(gfx_asc);
+
+    agx = apple_agx_create(sgx, gfx_asc);
+    object_property_add_child(OBJECT(t8030), "agx", OBJECT(agx));
+
+    prop = apple_dt_get_prop(gfx_asc, "reg");
+    reg  = (uint64_t*)prop->data;
+    sysbus_mmio_map(agx, 0, t8030->armio_base + reg[0]);
+    sysbus_mmio_map(agx, 1, t8030->armio_base + reg[2]);
+
+    prop = apple_dt_get_prop(sgx, "reg");
+    reg  = (uint64_t*)prop->data;
+    sysbus_mmio_map(agx, 2, t8030->armio_base + reg[0]);
+    sysbus_mmio_map(agx, 3, t8030->armio_base + reg[2]);
+
+    prop = apple_dt_get_prop(gfx_asc, "interrupts");
+    assert_nonnull(prop);
+    ints = (uint32_t*)prop->data;
+    for (i = 0; i < prop->len / sizeof(uint32_t); ++i) {
+        sysbus_connect_irq(agx, i, qdev_get_gpio_in(DEVICE(t8030->aic), ints[i]));
+    }
+
+    sysbus_realize_and_unref(agx, &error_fatal);
+}
+
 static void t8030_create_mca(AppleT8030MachineState* t8030)
 {
     AppleDTNode* child;
@@ -3190,6 +3303,7 @@ static void t8030_init(MachineState* machine)
     t8030_create_display(t8030);
     t8030_create_mt_spi(t8030);
     t8030_create_aop(t8030);
+    if (t8030->gpu) { t8030_create_gpu(t8030); }
     t8030_create_mca(t8030);
     t8030_create_speaker_top(t8030);
     t8030_create_speaker_bottom(t8030);
@@ -3277,6 +3391,7 @@ PROP_VISIT_GETTER_SETTER(uint32, disp_width);
 PROP_VISIT_GETTER_SETTER(uint32, disp_height);
 PROP_GETTER_SETTER(bool, enable_pac);
 PROP_GETTER_SETTER(bool, patch_check);
+PROP_GETTER_SETTER(bool, gpu);
 
 static void t8030_class_init(ObjectClass* klass, const void* data)
 {
@@ -3352,6 +3467,10 @@ static void t8030_class_init(ObjectClass* klass, const void* data)
     object_class_property_add_bool(klass, "enable-pac", t8030_get_enable_pac, t8030_set_enable_pac);
     object_class_property_set_description(klass, "enable-pac",
                                           "Enable PAC with virtualisation (supports arm64e binaries only).");
+    object_class_property_add_bool(klass, "gpu", t8030_get_gpu, t8030_set_gpu);
+    object_class_property_set_description(klass, "gpu",
+                                          "Expose the AGX GPU and emulate its coprocessor's firmware "
+                                          "(experimental, docs/GPU-EMULATION-SCOPE.md). Default off.");
 }
 
 static const TypeInfo t8030_info = {
