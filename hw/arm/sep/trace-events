@@ -2,3 +2,15 @@
 
 apple_sep_iop_start(const char *role) "%s"
 apple_sep_iop_wakeup(const char *role) "%s"
+
+# aes.c
+apple_sep_aess_cmd(uint32_t cmd, uint32_t normalized) "cmd 0x%03x (normalized 0x%02x)"
+apple_sep_aess_cmd_unknown(uint32_t cmd, uint32_t normalized) "cmd 0x%03x (normalized 0x%02x) not modelled; output left zeroed"
+apple_sep_aess_cmd_error(uint32_t cmd) "cmd 0x%03x raised the unrecoverable-error interrupt"
+
+# pka.c
+apple_sep_pka_tmm_unmodelled_read(uint64_t addr, uint64_t val) "PKA_TMM read 0x%" PRIx64 " (not modelled) -> 0x%" PRIx64
+
+# ssc.c
+apple_sep_ssc_cmd(uint8_t cmd, uint8_t b1, uint8_t b2, uint8_t b3, uint32_t len) "cmd 0x%x [1]=0x%02x [2]=0x%02x [3]=0x%02x len 0x%x"
+apple_sep_ssc_resp(uint8_t cmd, uint8_t flags) "cmd 0x%x -> flags 0x%02x"
