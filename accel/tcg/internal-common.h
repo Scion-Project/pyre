@@ -48,6 +48,9 @@ void tcg_exec_unrealizefn(CPUState* cpu);
  * Current cflags for hashing/comparison. Inline: it runs on every TB lookup,
  * including each indirect branch (helper_lookup_tb_ptr).
  */
+/* -accel tcg,x-inline-lookup=on|off (default on): see translator_lookup_and_goto_ptr() */
+extern bool tcg_inline_lookup;
+
 static inline uint32_t curr_cflags(CPUState* cpu)
 {
     uint32_t cflags = cpu->tcg_cflags;
