@@ -61,6 +61,10 @@ Ranked recommendation (details in "Design" and "Expected speedup"):
    guests, and for any guest that switches address spaces often).
    Implemented as ASID TLB contexts, see [ASID-TLB.md](ASID-TLB.md): the
    KPTI `sys` loop goes from 37.4 s to 6.1 s.
+4. **The softmmu memory path** (any guest): two fewer instructions in the
+   inline TLB lookup and a 1024-entry TLB floor, see
+   [SOFTMMU.md](SOFTMMU.md): the iOS restore boot 5.3% faster, 7.4% less
+   host CPU.
 
 The two alternative near-native designs are costed at the end: running guest
 EL0 natively in the host process (large win for user code, very large
