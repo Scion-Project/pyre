@@ -4,7 +4,8 @@
  * Proxy workloads for the hot paths in the iOS boot profile (ios-on-pixel
  * docs/PERF.md): indirect branches/returns (helper_lookup_tb_ptr and the
  * per-vCPU jump cache) and system-register reads (TPIDR_EL1, XNU's
- * current_thread()). Entered at EL1, MMU off. Reports PASS when done; the
+ * current_thread()). Entered at EL1, MMU off (workload 9 turns it on).
+ * Reports PASS when done; the
  * runner times the QEMU process. No Apple code or data.
  *
  * Build with -DWORKLOAD=<n> (see below), optionally -DITERS=, -DNFUNC=,
@@ -21,6 +22,9 @@
  *   7  vector FP: FMLA/FMUL/FADD on .4s and .2d (softfloat helpers today)
  *   8  scalar FP: FMADD/FMUL/FADD/FDIV/FSQRT, FCMP, FCVTZS/SCVTF (double and
  *      single), register-only
+ *   9  KPTI-style system calls: two ASID switches per iteration, loads from
+ *      16 pages and 4 spread calls in between (turns the MMU on, 16 KiB
+ *      pages, all mappings non-global)
  *
  * This file is a test input; it is not compiled into QEMU. It uses only
  * architectural encodings - no Apple code or data.
@@ -172,6 +176,73 @@ _start:
     fmadd   s20, s16, s17, s20
     fdiv    s21, s20, s18
     .endr
+    subs    x20, x20, #1
+    b.ne    1b
+#elif WORKLOAD == 9
+    /*
+     * KPTI-style system calls: two address spaces with the same (non-global)
+     * mappings under ASIDs 1 ("user") and 2 ("kernel"). Each iteration loads
+     * from 8 pages, switches TTBR0_EL1 to the other ASID (the system call
+     * entry), makes 4 spread calls and loads from 8 other pages, then
+     * switches back. Every switch is an ASID change.
+     */
+    .set W9_L2,   0x8001c0000               /* level-2 table, after the image */
+    .set W9_DATA, 0x800200000               /* 16 data pages */
+    ldr     x0, =W9_L2
+    mov     x1, #2048
+5:  str     xzr, [x0], #8
+    subs    x1, x1, #1
+    b.ne    5b
+    ldr     x0, =W9_L2
+    ldr     x1, =0x800000000 | 0xf01        /* 32 MiB block, AF, inner shareable, Attr0, nG */
+    str     x1, [x0, #0x400 * 8]
+    ldr     x2, =0x2000000
+    add     x1, x1, x2
+    str     x1, [x0, #0x401 * 8]
+    ldr     x1, =CTL_BASE | 0x0060000000000405 /* device block, global */
+    str     x1, [x0, #0x100 * 8]
+    dsb     ish
+    ldr     x0, =0x00ff                     /* Attr0 normal WB, Attr1 device */
+    msr     mair_el1, x0
+    /* T0SZ=28 (36-bit VA, level 2 start), TG0=16K, EPD1, TG1=16K, IPS=36 bits, ASID from TTBR0 */
+    ldr     x0, =28 | (1 << 8) | (1 << 10) | (3 << 12) | (2 << 14) | (28 << 16) | (1 << 23) | (1 << 30) | (1 << 32)
+    msr     tcr_el1, x0
+    ldr     x25, =W9_L2 | (1 << 48)
+    ldr     x26, =W9_L2 | (2 << 48)
+    msr     ttbr0_el1, x25
+    isb
+    tlbi    vmalle1
+    dsb     ish
+    isb
+    mrs     x0, sctlr_el1
+    orr     x0, x0, #(1 << 0)               /* M */
+    orr     x0, x0, #(1 << 2)               /* C */
+    orr     x0, x0, #(1 << 12)              /* I */
+    bic     x0, x0, #(1 << 1)               /* A */
+    bic     x0, x0, #(1 << 19)              /* WXN */
+    msr     sctlr_el1, x0
+    isb
+    ldr     x27, =W9_DATA
+1:  mov     x1, x27
+    .rept 8
+    ldr     x0, [x1]
+    add     x1, x1, #4, lsl #12
+    .endr
+    msr     ttbr0_el1, x26
+    isb
+    .rept 4
+    madd    x0, x22, x23, x21
+    blr     x0
+    add     x22, x22, #709
+    and     x22, x22, x24
+    .endr
+    add     x1, x27, #32, lsl #12
+    .rept 8
+    ldr     x0, [x1]
+    add     x1, x1, #4, lsl #12
+    .endr
+    msr     ttbr0_el1, x25
+    isb
     subs    x20, x20, #1
     b.ne    1b
 #else

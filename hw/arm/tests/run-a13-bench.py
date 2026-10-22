@@ -41,6 +41,7 @@ WORKLOADS = [
     ("w6", ["-DWORKLOAD=6", "-DITERS=5000000"], "40M MSR TPIDR_EL1/ELR_EL1"),
     ("w7", ["-DWORKLOAD=7", "-DITERS=2000000"], "48M vector FMLA/FMUL/FADD (.4s/.2d)"),
     ("w8", ["-DWORKLOAD=8", "-DITERS=2000000"], "40M scalar FP (FMADD/FDIV/FSQRT/FCMP/FCVTZS/SCVTF)"),
+    ("w9", ["-DWORKLOAD=9", "-DITERS=1000000"], "2M ASID switches, KPTI-style (16 pages, 4 calls each)"),
 ]
 
 
