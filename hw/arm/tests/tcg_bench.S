@@ -25,6 +25,11 @@
  *   9  KPTI-style system calls: two ASID switches per iteration, loads from
  *      16 pages and 4 spread calls in between (turns the MMU on, 16 KiB
  *      pages, all mappings non-global)
+ *  10  loads and stores that hit the softmmu TLB: 16 per iteration, mixed
+ *      sizes, within one 16 KiB page (MMU off)
+ *  11  TLB refills: loads scattered over 4096 16 KiB pages (MMU on, 64 MiB
+ *      of VA aliased onto 512 KiB of RAM), so nearly every access walks the
+ *      page table unless the softmmu TLB holds all 4096 pages
  *
  * This file is a test input; it is not compiled into QEMU. It uses only
  * architectural encodings - no Apple code or data.
@@ -243,6 +248,87 @@ _start:
     .endr
     msr     ttbr0_el1, x25
     isb
+    subs    x20, x20, #1
+    b.ne    1b
+#elif WORKLOAD == 10
+    ldr     x1, =0x800400000
+1:  ldr     x2, [x1]
+    ldr     w3, [x1, #0x1008]
+    ldrh    w4, [x1, #0x1010]
+    ldrb    w5, [x1, #0xf18]
+    str     x2, [x1, #0x40]
+    str     w3, [x1, #0x1048]
+    strh    w4, [x1, #0x1050]
+    strb    w5, [x1, #0xf58]
+    ldr     x6, [x1, #0x3080]
+    ldr     x7, [x1, #0x2088]
+    ldr     w8, [x1, #0x1090]
+    ldrsw   x9, [x1, #0x98]
+    str     x6, [x1, #0xc0]
+    str     x7, [x1, #0x10c8]
+    str     w8, [x1, #0x20d0]
+    str     x9, [x1, #0x30d8]
+    subs    x20, x20, #1
+    b.ne    1b
+#elif WORKLOAD == 11
+    .set W11_L2,  0x8001c0000               /* level-2 table, after the image */
+    .set W11_L3,  0x800200000               /* two level-3 tables: 4096 16 KiB pages */
+    .set W11_VA,  0x804000000               /* 64 MiB of VA ... */
+    .set W11_PA,  0x802000000               /* ... onto 32 pages of RAM */
+    ldr     x0, =W11_L2
+    mov     x1, #2048
+5:  str     xzr, [x0], #8
+    subs    x1, x1, #1
+    b.ne    5b
+    ldr     x0, =W11_L2
+    ldr     x1, =0x800000000 | 0x701        /* 32 MiB block (code, tables), AF, inner shareable, Attr0 */
+    str     x1, [x0, #0x400 * 8]
+    ldr     x1, =CTL_BASE | 0x0060000000000405 /* device block */
+    str     x1, [x0, #0x100 * 8]
+    ldr     x1, =W11_L3 | 3
+    str     x1, [x0, #0x402 * 8]
+    ldr     x1, =(W11_L3 + 0x4000) | 3
+    str     x1, [x0, #0x403 * 8]
+    ldr     x0, =W11_L3
+    mov     x2, #0
+    ldr     x3, =W11_PA | 0x703             /* page, AF, inner shareable, Attr0 */
+6:  and     x4, x2, #31
+    add     x1, x3, x4, lsl #14
+    str     x1, [x0, x2, lsl #3]
+    add     x2, x2, #1
+    cmp     x2, #4096
+    b.ne    6b
+    dsb     ish
+    ldr     x0, =0x00ff                     /* Attr0 normal WB, Attr1 device */
+    msr     mair_el1, x0
+    /* T0SZ=28 (36-bit VA, level 2 start), TG0=16K, EPD1, TG1=16K, IPS=36 bits */
+    ldr     x0, =28 | (1 << 8) | (1 << 10) | (3 << 12) | (2 << 14) | (28 << 16) | (1 << 23) | (1 << 30) | (1 << 32)
+    msr     tcr_el1, x0
+    ldr     x0, =W11_L2
+    msr     ttbr0_el1, x0
+    isb
+    tlbi    vmalle1
+    dsb     ish
+    isb
+    mrs     x0, sctlr_el1
+    orr     x0, x0, #(1 << 0)               /* M */
+    orr     x0, x0, #(1 << 2)               /* C */
+    orr     x0, x0, #(1 << 12)              /* I */
+    bic     x0, x0, #(1 << 1)               /* A */
+    bic     x0, x0, #(1 << 19)              /* WXN */
+    msr     sctlr_el1, x0
+    isb
+    ldr     x27, =W11_VA
+    mov     x22, #0
+    ldr     x23, =5039                      /* odd stride over 16384 4 KiB slots: every page, 4x a cycle */
+    ldr     x24, =16383
+1:
+    .rept 4
+    add     x0, x27, x22, lsl #12
+    ldr     x1, [x0]
+    add     x22, x22, x23
+    and     x22, x22, x24
+    .endr
     subs    x20, x20, #1
     b.ne    1b
 #else
