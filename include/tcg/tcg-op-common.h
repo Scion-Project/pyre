@@ -63,6 +63,18 @@ void tcg_gen_exit_tb(const TranslationBlock* tb, unsigned idx);
  */
 void tcg_gen_goto_tb(unsigned idx);
 
+/*
+ * Same-ISA translation regions (tcg/tcg-sit.h), for AArch64 guests on
+ * AArch64 hosts only (TCG_TARGET_HAS_sit).
+ */
+typedef struct SitLayout SitLayout;
+typedef struct SitInsn   SitInsn;
+void tcg_gen_sit_enter(const SitLayout* lay);
+void tcg_gen_sit(const SitInsn* si);
+void tcg_gen_sit_exit(void);
+void tcg_gen_sit_exit_after(TCGOp* op);
+void tcg_gen_sit_brcond(const SitInsn* si, TCGLabel* l);
+
 /**
  * tcg_gen_lookup_and_goto_ptr() - look up the current TB, jump to it if valid
  * @addr: Guest address of the target TB

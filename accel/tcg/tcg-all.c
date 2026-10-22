@@ -42,6 +42,7 @@
 #include "accel/accel-cpu-ops.h"
 #include "accel/tcg/cpu-ops.h"
 #include "internal-common.h"
+#include "accel/tcg/native-int.h"
 
 struct TCGState
 {
@@ -88,6 +89,10 @@ bool tcg_native_fp_explicit;
 bool tcg_native_fp_fault;
 bool tcg_native_fp_selftest = true;
 bool tcg_native_fp_inline   = true;
+bool tcg_native_int;
+bool tcg_native_int_explicit;
+bool tcg_native_int_ldst = true;
+bool tcg_native_int_el1;
 
 static int tcg_init_machine(AccelState* as, MachineState* ms)
 {
@@ -131,6 +136,16 @@ static int tcg_init_machine(AccelState* as, MachineState* ms)
     }
 
     tcg_allowed = true;
+
+#ifdef __aarch64__
+    if (tcg_native_int_explicit && tcg_native_int) {
+        info_report("native-int: on (EL0%s%s)", tcg_native_int_el1 ? " and EL1" : "",
+                    tcg_native_int_ldst ? "" : ", loads/stores on TCG");
+    }
+#else
+    if (tcg_native_int) { warn_report("native-int: not available on this host"); }
+    tcg_native_int = false;
+#endif
 
     page_init();
     tb_htable_init();
@@ -280,6 +295,17 @@ static void tcg_set_native_fp_selftest(Object* obj, bool value, Error** errp) { 
 static bool tcg_get_native_fp_inline(Object* obj, Error** errp) { return tcg_native_fp_inline; }
 static void tcg_set_native_fp_inline(Object* obj, bool value, Error** errp) { tcg_native_fp_inline = value; }
 
+static bool tcg_get_native_int(Object* obj, Error** errp) { return tcg_native_int; }
+static void tcg_set_native_int(Object* obj, bool value, Error** errp)
+{
+    tcg_native_int          = value;
+    tcg_native_int_explicit = true;
+}
+static bool tcg_get_native_int_ldst(Object* obj, Error** errp) { return tcg_native_int_ldst; }
+static void tcg_set_native_int_ldst(Object* obj, bool value, Error** errp) { tcg_native_int_ldst = value; }
+static bool tcg_get_native_int_el1(Object* obj, Error** errp) { return tcg_native_int_el1; }
+static void tcg_set_native_int_el1(Object* obj, bool value, Error** errp) { tcg_native_int_el1 = value; }
+
 static int tcg_gdbstub_supported_sstep_flags(AccelState* as) { return SSTEP_ENABLE | SSTEP_NOIRQ | SSTEP_NOTIMER; }
 
 static void tcg_accel_class_init(ObjectClass* oc, const void* data)
@@ -328,6 +354,17 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
     object_class_property_add_bool(oc, "x-native-fp-inline", tcg_get_native_fp_inline, tcg_set_native_fp_inline);
     object_class_property_set_description(oc, "x-native-fp-inline",
                                           "Diagnostic: set off to keep native-fp in helpers (no inline host FP)");
+
+    object_class_property_add_bool(oc, "native-int", tcg_get_native_int, tcg_set_native_int);
+    object_class_property_set_description(oc, "native-int",
+                                          "Execute guest EL0 integer code, loads/stores and branches as the same "
+                                          "host instructions (AArch64 hosts, default off, see docs/NATIVE-INT.md)");
+    object_class_property_add_bool(oc, "x-native-int-ldst", tcg_get_native_int_ldst, tcg_set_native_int_ldst);
+    object_class_property_set_description(oc, "x-native-int-ldst",
+                                          "Diagnostic: set off to keep native-int loads and stores on TCG");
+    object_class_property_add_bool(oc, "x-native-int-el1", tcg_get_native_int_el1, tcg_set_native_int_el1);
+    object_class_property_set_description(oc, "x-native-int-el1",
+                                          "Experimental: native-int at EL1 too (measurement only)");
 }
 
 static const TypeInfo tcg_accel_type = {

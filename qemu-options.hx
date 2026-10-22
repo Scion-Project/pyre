@@ -43,6 +43,7 @@ DEF("accel", HAS_ARG, QEMU_OPTION_accel,
     "                kvm-shadow-mem=size of KVM shadow MMU in bytes\n"
     "                one-insn-per-tb=on|off (one guest instruction per TCG translation block)\n"
     "                native-fp=on|off (TCG: guest FP on the host FPU where bit-exact, default on)\n"
+    "                native-int=on|off (TCG: guest EL0 integer code as host instructions, default off)\n"
     "                split-wx=on|off (enable TCG split w^x mapping)\n"
     "                tb-size=n (TCG translation block cache size)\n"
     "                dirty-ring-size=n (KVM dirty ring GFN count, default 0)\n"

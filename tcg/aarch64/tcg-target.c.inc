@@ -3109,3 +3109,5 @@ static const DebugFrame debug_frame = {.h.cie.len           = sizeof(DebugFrameC
 
 void tcg_register_jit(const void* buf, size_t buf_size)
 { tcg_register_jit_int(buf, buf_size, &debug_frame, sizeof(debug_frame)); }
+
+#include "tcg-target-sit.c.inc"
