@@ -641,6 +641,7 @@ typedef struct CPUArchState
         uint64_t vbar_gl[4];
         uint64_t spsr_gl[4];
         uint64_t aspsr_gl[4];
+        uint64_t aspsr_el1; /* A14: ASPSR outside the guarded level */
         uint64_t esr_gl[4];
         uint64_t elr_gl[4];
         uint64_t far_gl[4];

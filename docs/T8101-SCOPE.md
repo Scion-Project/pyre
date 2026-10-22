@@ -1,8 +1,10 @@
 # An Apple A14 (`t8101`, iPhone 12) machine: scoping study
 
-Status: **research only**. Nothing here is implemented. This document scopes
-what it would take to add a `t8101` machine next to `t8030`, and whether
-it's worth doing for the GPU work in [`GPU-EMULATION-SCOPE.md`](GPU-EMULATION-SCOPE.md).
+Status: **T0 and T1 implemented** (`-M t8101`, see §9 for what was done,
+what was verified and how, and what T2 needs). Sections 1–8 are the original
+scoping study. This document scopes what it would take to add a `t8101`
+machine next to `t8030`, and whether it's worth doing for the GPU work in
+[`GPU-EMULATION-SCOPE.md`](GPU-EMULATION-SCOPE.md).
 
 Why ask: the A14's GPU is a **G13** part, the same generation as the M1
 (`t8103`) GPU that Asahi Linux has documented in depth (m1n1, drm/asahi,
@@ -333,3 +335,69 @@ pinned iOS 14.8 `d53g` build.
 * LLVM `AArch64Processors.td` (`apple-a13`/`apple-a14` feature sets).
 * Sven Peter, "Apple's SPRR and GXF" (M1). Project Zero, "The curious tale of a
   fake Carrier.app" (2022, DCP background).
+
+---
+
+## 9. T0/T1 status (October 2026)
+
+**Result.** `-M t8101` boots the iOS 14.8 (18H17) `iPhone13,2` kernel,
+headless, through IOKit matching to `BSD root: md0`, mounts the restore
+ramdisk (the same restore ramdisk and trustcache as `iPhone12,1` 14.8) and
+starts `launchd` and `restored_external` ("Restore environment starting").
+All six application cores start (`-smp 7`: 6 + the parked SEP core). That is
+past the T1 exit; T1's "PPL initialised" and "unknown-MMIO triaged" are
+covered by the items below. `t8030` is unchanged (regression runs in the PR).
+
+Run it like `t8030`, with the d53g device tree and the iPhone13,x
+kernelcache from your own IPSW, the 14.8 restore ramdisk/trustcache, and the
+idle placeholder SEP ROM path (`sep-rom=` an idle loop, `sep-fw=` anything):
+the real SEP needs A14 values (§3), and this build enables
+`ENABLE_DATA_ENCRYPTION`, which rules out the simulated SEP.
+
+### 9.1 How the "verify" items were resolved
+
+Evidence types: **DT** = read from the d53g device tree; **KC** = from the
+iPhone13,x kernelcache (strings, or the same code sequence as in the
+iPhone12,x kernel with different encodings/offsets); **BOOT** = the kernel
+gets past the point that needed it; **M1** = public Asahi/m1n1 documentation,
+not checked beyond BOOT. Nothing from these files is in the repository.
+
+| Item | Answer | Evidence |
+|---|---|---|
+| Memory map (SROM/SRAM/DRAM, arm-io) | Unchanged: arm-io `ranges` `0x0 → 0x2_0000_0000`, size 4 GiB, PCIe at `0x6_0000_0000`; DRAM at `0x8_0000_0000` | DT, BOOT |
+| AIC | Same AICv1 (`aic,1`, `aic-version 2`), MMIO 0xC000; 704 IRQs (22 `ipid-mask` words). `aic-timebase` reg is absolute on d53g | DT, BOOT (`_aicNumExtInts = 0x2c0`) |
+| DART | `dart,t8020` throughout. New: an `instance` list shorter than `reg`; a `DAPF`-typed entry is a DART with an address filter whose filter range is appended after the listed ones. The kernel wants APF slices (`PARAMS2[15:8]`) and lock support in `PARAMS2` | DT, KC (panic strings), BOOT |
+| CPU MIDR | `apple,icestorm` ×4 (cluster 0, E), `apple,firestorm` ×2 (cluster 1, P); part 0x20/0x21 | DT, XNU cpuid.h, BOOT |
+| GXF/SPRR | **Not as on A13.** GL1 has its own SP/TPIDR/VBAR/SPSR/ASPSR/ESR/ELR/FAR at `S3_6_C15_C10_0..7`, and the EL1 names are not redirected in GL; SPRR EL1 permissions moved from `S3_6_C15_C3_0` to `C1_6`, the EL0 mask from `C3_1` to `C3_0` | KC (same PPL code, swapped encodings), M1 names, BOOT |
+| New sysregs | `ACNTVCT_EL0` `S3_4_C15_C10_6` (the kernel's `mach_absolute_time`), `APSTS_EL1` `S3_6_C15_C12_4` (spun on for MKEYVld); ~70 other encodings used only by the A14 kernel are storage (HID2/6/17/18/21, EHID9/20 among them) | KC (encoding scan), BOOT |
+| PMGR | Main block moved to `0x23B70_0000` (size 0x80000) with power-state registers from offset 0 and SEP_PS at `+0xC00` (`ps-regs`); always-on power states at `0x23D28_0000` (catch-all range, mirrored now); fuse block at `0x23D2B_C000` as on t8030 | DT, BOOT |
+| PMGR properties | The kernel needs t8030's voltage-state tables (`voltage-states1` etc.), `bridge-settings-0..17` (d53g has no optional bridges), `tunableh-board-id`/`-major-rev`/`-minor-rev` on the pmgr node, and per-cluster DVMR weight maps (`0x210E206A8`, `+0x38`, `+0x40`; `0x211E2...`) | KC (panic strings / `AppleT8101PMGR` code), BOOT; values synthesized |
+| CPU start | `pmgr +0x54004` (M1 layout) | M1, BOOT (all six cores take interrupts) |
+| AMCC | `mcc` node identical in shape (4 channels, same reg layout); t8030 AMCC model used as is | DT, BOOT |
+| Board identity | chip-id 0x8101, board-id 0xC, security domain 1 | BuildManifest (d53gap identity), BOOT |
+| IOPs | `iop,ascwrap-v4` (ANS, SMC, AOP, SIO, PMP; SEP `iop-sep,ascwrap-v4`). Same message registers, queue control at `+0x10/+0x14` of the mailbox block (Linux `asc-mailbox-v4`) | BOOT (RTKit handshakes complete) |
+| ANS / NVMe | `nvme-linear-sq` makes the kernel pick ANS3 + CoastGuard, which fails in `pmap_iommu_map` (as t8030's `nvme-coastguard`); removed, ANS2 + NVMe work | BOOT |
+| PCIe | Same register layout as t8030 with 3 ports (bridges 1, 2) | DT, BOOT |
+| SPI, SPMI | New controllers: `spi-1,spimc` and `spmi,t8101` (M1-style). Not created yet | DT |
+| DCP | Present (`dcp`, `dart-dcp`, `dcp0-expert`); removed, the system runs headless to restored | DT, BOOT |
+| SIO protocol | 9, as on t8030 | BOOT |
+| SPTM | Not used by iOS 14 | KC |
+
+Not verified: the A14 MIDR variant/revision (1/1 is the A13 value; the kernel
+reports chip revision B1 from the fuse readback, which is consistent), the
+meaning of the 70 storage registers, the real DVMR weight maps and tunables
+(made-up values the kernel accepts), whether `restored` needs anything else
+(the next stop is USB), the A14 SEP (§3).
+
+### 9.2 What T2 needs
+
+* **USB** (DWC3/ATC on d53g; there is no `mapper-usb-device`, so no DWC2
+  OTG): for restore and the uplink. Then the restore flow can be tried.
+* **SPI** (`spimc`, M1-style; Linux `spi-apple.c`) for multi-touch and the
+  audio codec, and **SPMI** (`spmi,t8101`; Linux `spmi-apple-controller.c`)
+  for the PMU (RTC: "RTC did not show up").
+* **Temperature sensors** (DT-listed, removed for now) and the remaining
+  t8101 nodes the KEEP_COMP list drops (`mca`, `nco`, `pwm`, `dwi`, ...).
+* **ANS3 / CoastGuard** if the installed system needs it (NVMMU question
+  from §1.2).
+* An installed-system boot to `launchd` with the root on NVMe (T2 exit).

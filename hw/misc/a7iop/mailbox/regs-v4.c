@@ -44,10 +44,37 @@
 #define REG_AP_RECV2     (0x738)
 #define REG_AP_RECV3     (0x73C)
 
+/*
+ * ASC wrapper v4 ("iop,ascwrap-v4", t8101/A14 and the M1) keeps the message
+ * registers where they are but moves the two queue-control registers to
+ * +0x10 (AP to IOP) and +0x14 (IOP to AP), as in Linux's apple-mailbox
+ * "asc-mailbox-v4" layout (A2I_CONTROL 0x110, I2A_CONTROL 0x114 from the
+ * mailbox block). The machine selects it for the whole SoC.
+ */
+#define REG_IOP_CTRL_ASC4 (0x10)
+#define REG_AP_CTRL_ASC4  (0x14)
+
+static bool apple_a7iop_v4_asc4_layout;
+
+void apple_a7iop_mailbox_set_ascwrap_v4(bool on) { apple_a7iop_v4_asc4_layout = on; }
+
+static hwaddr apple_a7iop_v4_mailbox_addr(hwaddr addr)
+{
+    if (!apple_a7iop_v4_asc4_layout) { return addr; }
+    switch (addr) {
+        case REG_IOP_CTRL_ASC4: return REG_IOP_CTRL;
+        case REG_AP_CTRL_ASC4 : return REG_AP_CTRL;
+        case REG_IOP_CTRL     :
+        case REG_AP_CTRL      : return ~(hwaddr)0;
+        default               : return addr;
+    }
+}
+
 static void apple_a7iop_v4_mailbox_reg_write(void* opaque, hwaddr addr, const uint64_t data, unsigned size)
 {
     AppleA7IOPMailbox* s = opaque;
 
+    addr = apple_a7iop_v4_mailbox_addr(addr);
     switch (addr) {
         case REG_INT_MASK_SET: apple_a7iop_mailbox_set_int_mask(s, (uint32_t)data); break;
         case REG_INT_MASK_CLR: apple_a7iop_mailbox_clear_int_mask(s, (uint32_t)data); break;
@@ -79,6 +106,7 @@ static uint64_t apple_a7iop_v4_mailbox_reg_read(void* opaque, hwaddr addr, unsig
     AppleA7IOPMailbox* s   = opaque;
     uint64_t           ret = 0;
 
+    addr = apple_a7iop_v4_mailbox_addr(addr);
     switch (addr) {
         case REG_INT_MASK_SET:
         case REG_INT_MASK_CLR: return apple_a7iop_mailbox_get_int_mask(s);

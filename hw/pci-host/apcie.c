@@ -1404,7 +1404,7 @@ static ApplePCIEPort* apple_pcie_create_port(AppleDTNode* node, uint32_t bus_nr,
         port->manual_enable = (prop != NULL);
     }
 
-    if (host->pcie->chip_id == 0x8020 || host->pcie->chip_id == 0x8030) {
+    if (host->pcie->chip_id == 0x8020 || host->pcie->chip_id == 0x8030 || host->pcie->chip_id == 0x8101) {
         // device_id = 0x1002;
         // device_id = 0x1003;
         device_id = 0x100c;    // for t8030, according to srd.cx's iotree
@@ -1601,7 +1601,7 @@ SysBusDevice* apple_pcie_from_node(AppleDTNode* node, uint32_t chip_id)
         root_mappings = 4;
         port_mappings = 1;
     }
-    else if (chip_id == 0x8020 || chip_id == 0x8030) {
+    else if (chip_id == 0x8020 || chip_id == 0x8030 || chip_id == 0x8101) {
         DPRINTF("%s: compatible check: use T8030(/T8020) mode\n", __func__);
 
         common_index  = 1;
@@ -1610,6 +1610,8 @@ SysBusDevice* apple_pcie_from_node(AppleDTNode* node, uint32_t chip_id)
         port_entries  = 4;
         root_mappings = 5;
         port_mappings = 4;
+        // t8101 (d53g): the same register layout with three ports
+        if (chip_id == 0x8101) { port_count = (prop->len / 16 - port_index) / port_entries; }
     }
     else {
         assert_not_reached();
@@ -1660,7 +1662,7 @@ SysBusDevice* apple_pcie_from_node(AppleDTNode* node, uint32_t chip_id)
                               reg[(port_index + (i * port_entries) + 0) * 2 + 1]);
         sysbus_init_mmio(sbd, &port->port_cfg);
         sysbus_mmio_map(sbd, mmio_index++, reg[(port_index + (i * port_entries) + 0) * 2 + 0]);
-        if (chip_id == 0x8020 || chip_id == 0x8030) {
+        if (chip_id == 0x8020 || chip_id == 0x8030 || chip_id == 0x8101) {
             snprintf(temp_name, sizeof(temp_name), "port%u_config_ltssm_debug", i);
             memory_region_init_io(&port->port_config_ltssm_debug, OBJECT(port), &apple_pcie_port_config_ltssm_debug_ops,
                                   port, temp_name, reg[(port_index + (i * port_entries) + 1) * 2 + 1]);
@@ -1686,7 +1688,11 @@ SysBusDevice* apple_pcie_from_node(AppleDTNode* node, uint32_t chip_id)
         }
     }
 
-    if (chip_id == 0x8015 || chip_id == 0x8020 || chip_id == 0x8030) {
+    if (chip_id == 0x8101) {
+        // port 0 has no bridge in the d53g device tree (ports 1 and 2 do)
+        pci_set_power(PCI_DEVICE(s->ports[0]), false);
+    }
+    else if (chip_id == 0x8015 || chip_id == 0x8020 || chip_id == 0x8030) {
         pci_set_power(PCI_DEVICE(s->ports[0]), false);
         pci_set_power(PCI_DEVICE(s->ports[1]), false);
         // pci_set_power(PCI_DEVICE(s->ports[2]), false);
