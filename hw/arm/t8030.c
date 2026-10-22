@@ -869,6 +869,39 @@ static void t8030_rtkit_mem_setup(AppleT8030MachineState* t8030, CarveoutAllocat
  * (the per-context TTBR table the firmware walks; its property is a page
  * number), and the AP/firmware page-table handoff area.
  */
+/*
+ * Add a PPL-protected I/O range to /defaults/pmap-io-ranges, as iBoot does
+ * for the UAT regions: the kernel's UAT code panics unless the page is
+ * PPL-owned (flag 0x4000) and carries the signature it expects.
+ */
+static void t8030_add_pmap_io_range(AppleT8030MachineState* t8030, hwaddr addr, uint64_t size, uint32_t sig)
+{
+    AppleDTNode* defaults;
+    AppleDTProp* prop;
+    uint8_t*     data;
+    uint32_t     len;
+    struct QEMU_PACKED
+    {
+        uint64_t addr;
+        uint64_t size;
+        uint32_t flags;
+        uint32_t sig;
+    } rgn = {cpu_to_le64(addr), cpu_to_le64(size), cpu_to_le32(0x4007), cpu_to_le32(sig)};
+
+    defaults = apple_dt_get_node(t8030->device_tree, "defaults");
+    assert_nonnull(defaults);
+    prop = apple_dt_get_prop(defaults, "pmap-io-ranges");
+    assert_nonnull(prop);
+    for (len = 0; len + sizeof(rgn) <= prop->len; len += sizeof(rgn)) {
+        if (ldq_le_p(prop->data + len) == addr) { return; } // already added (reboot)
+    }
+    data = g_malloc(prop->len + sizeof(rgn));
+    memcpy(data, prop->data, prop->len);
+    memcpy(data + prop->len, &rgn, sizeof(rgn));
+    apple_dt_set_prop(defaults, "pmap-io-ranges", prop->len + sizeof(rgn), data);
+    g_free(data);
+}
+
 static void t8030_gpu_mem_setup(AppleT8030MachineState* t8030, CarveoutAllocator* ca)
 {
     AppleDTNode* sgx;
@@ -887,6 +920,10 @@ static void t8030_gpu_mem_setup(AppleT8030MachineState* t8030, CarveoutAllocator
     apple_dt_set_prop_u64(sgx, "gfx-shared-region-base", shared);
     apple_dt_set_prop_u32(sgx, "ttbat-phys-addr-base", ttbat / AGX_UAT_REGION_SIZE);
     apple_dt_set_prop_u64(sgx, "gfx-handoff-base", handoff);
+
+    t8030_add_pmap_io_range(t8030, shared, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_SHARED);
+    t8030_add_pmap_io_range(t8030, ttbat, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_TTBAT);
+    t8030_add_pmap_io_range(t8030, handoff, AGX_UAT_REGION_SIZE, AGX_PMAP_SIG_HANDOFF);
 
     apple_agx_set_uat_regions(SYS_BUS_DEVICE(object_property_get_link(OBJECT(t8030), "agx", &error_fatal)), shared,
                               ttbat, handoff);
