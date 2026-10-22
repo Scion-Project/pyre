@@ -63,14 +63,15 @@ A14_TESTS = [
 # natively and compares with the embedded hash.
 # ASID TLB contexts (-accel tcg,asid-tlbs=N, tlb_switch_asid_ctx()): the
 # same checks with the default 8 slots, with 1 slot (every switch evicts),
-# without the kept-aside jump caches and with the contexts off. Its last check probes that kept-aside TLBs really
-# come back; the negative control runs the default build with asid-tlbs=0,
-# where that probe must FAIL, so a run that silently fell back to flushing
+# with the kept-aside jump caches (x-asid-jc=on; off by default) and with the
+# contexts off. Its last check probes that kept-aside TLBs really come back;
+# the negative control runs the default build with asid-tlbs=0, where that
+# probe must FAIL, so a run that silently fell back to flushing
 # cannot pass the default case.
 ASID_TESTS = [
     ("asid_tlb", "asid_tlb_test.S", [], "pass", {}),
     ("asid_tlb (asid-tlbs=1)", "asid_tlb_test.S", [], "pass", {"accel": "asid-tlbs=1"}),
-    ("asid_tlb (x-asid-jc=off)", "asid_tlb_test.S", [], "pass", {"accel": "x-asid-jc=off"}),
+    ("asid_tlb (x-asid-jc=on)", "asid_tlb_test.S", [], "pass", {"accel": "x-asid-jc=on"}),
     ("asid_tlb (asid-tlbs=0)", "asid_tlb_test.S", ["-DNO_ASID_TLBS"], "pass", {"accel": "asid-tlbs=0"}),
     ("asid_tlb (negative control: asid-tlbs=0)", "asid_tlb_test.S", [], ("mismatch", 73), {"accel": "asid-tlbs=0"}),
 ]
