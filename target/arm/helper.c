@@ -2401,12 +2401,59 @@ static void vmsa_tcr_el12_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64
     raw_write(env, ri, value);
 }
 
+/*
+ * Every register the EL1&0 page-table walk (ptw.c) reads whose writes do not
+ * flush the TLB: both TTBRs (ASIDs and table bases), the stage 2 (VTTBR/VTCR,
+ * secure ones too), MAIR_EL1, SCR_EL3, and Apple's SPRR configuration and
+ * permission registers (SPRR_CONFIG_EL0/EL1, SPRR_EL0BR0/EL1BR1: written by
+ * the kernel at EL1 without a flush). TLBs kept aside under this key are only
+ * brought back while all of them hold the same values as when the guest left,
+ * so a restore gives the TLB the guest would have had if it had not left.
+ * TCR_EL1, SCTLR_EL1 and the HCR_EL2 bits the walk depends on flush the TLB
+ * (dropping kept-aside TLBs). See tlb_switch_asid_ctx().
+ */
+static void vmsa_el10_ctx_key(CPUARMState* env, TLBCtxKey* key)
+{
+    key->w[0]  = env->cp15.ttbr0_el[1];
+    key->w[1]  = env->cp15.ttbr1_el[1];
+    key->w[2]  = env->cp15.vttbr_el2;
+    key->w[3]  = env->cp15.vtcr_el2;
+    key->w[4]  = env->cp15.vsttbr_el2;
+    key->w[5]  = env->cp15.vstcr_el2;
+    key->w[6]  = env->cp15.mair_el[1];
+    key->w[7]  = env->cp15.scr_el3;
+    key->w[8]  = env->sprr.sprr_config_el[0];
+    key->w[9]  = env->sprr.sprr_config_el[1];
+    key->w[10] = env->sprr.sprr_el_br_el1[0][0];
+    key->w[11] = env->sprr.sprr_el_br_el1[1][1];
+}
+
 static void vmsa_ttbr_write(CPUARMState* env, const ARMCPRegInfo* ri, uint64_t value)
 {
     /* If the ASID changes (with a 64-bit write), we must flush the TLB.  */
     if (cpreg_field_is_64bit(ri) && extract64(raw_read(env, ri) ^ value, 48, 16) != 0) {
         ARMCPU* cpu = env_archcpu(env);
-        if (ri->state == ARM_CP_STATE_AA64) { tlb_flush_asid_tagged_by_mmuidx(CPU(cpu), vae1_tlbmask(env)); }
+        if (ri->state == ARM_CP_STATE_AA64) {
+            uint64_t hcr = arm_hcr_el2_eff(env);
+
+            /*
+             * In the EL1&0 regime, keep the outgoing address space's TLBs
+             * instead of dropping their ASID-tagged entries. The key is taken
+             * from env, so only do this for the TTBRx_EL1 fields themselves.
+             */
+            if (tlb_asid_ctx_enabled() && (hcr & (HCR_E2H | HCR_TGE)) != (HCR_E2H | HCR_TGE)
+                && (ri->fieldoffset == offsetof(CPUARMState, cp15.ttbr0_el[1])
+                    || ri->fieldoffset == offsetof(CPUARMState, cp15.ttbr1_el[1]))) {
+                TLBCtxKey old_key, new_key;
+
+                vmsa_el10_ctx_key(env, &old_key);
+                raw_write(env, ri, value);
+                vmsa_el10_ctx_key(env, &new_key);
+                tlb_switch_asid_ctx(CPU(cpu), vae1_tlbmask(env), &old_key, &new_key);
+                return;
+            }
+            tlb_flush_asid_tagged_by_mmuidx(CPU(cpu), vae1_tlbmask(env));
+        }
         else {
             tlb_flush(CPU(cpu));
         }

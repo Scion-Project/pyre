@@ -12,6 +12,7 @@
 #include "qapi/error.h"
 #include "system/cpu-timers.h"
 #include "hw/core/cpu.h"
+#include "exec/cputlb.h"
 #include "tcg/tcg.h"
 #include "internal-common.h"
 #include "tb-context.h"
@@ -127,6 +128,19 @@ static void tcg_dump_flush_info(GString* buf)
     g_string_append_printf(buf, "TLB full flushes    %zu\n", flush_full);
     g_string_append_printf(buf, "TLB partial flushes %zu\n", flush_part);
     g_string_append_printf(buf, "TLB elided flushes  %zu\n", flush_elide);
+    {
+        CPUState* cpu;
+        uint64_t  hits = 0, misses = 0;
+
+        CPU_FOREACH (cpu) {
+            uint64_t h, m;
+
+            tlb_asid_ctx_stats(cpu, &h, &m);
+            hits   += h;
+            misses += m;
+        }
+        g_string_append_printf(buf, "ASID TLB switches   %" PRIu64 " (%" PRIu64 " restored)\n", hits + misses, hits);
+    }
 }
 
 static void dump_exec_info(GString* buf)

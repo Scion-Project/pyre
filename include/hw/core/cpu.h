@@ -490,6 +490,8 @@ struct CPUState
     MemoryRegion*           memory;
 
     struct CPUJumpCache* tb_jmp_cache;
+    /* TLBs of recently left address spaces, see tlb_switch_asid_ctx() */
+    struct TLBCtxCache* tlb_ctx;
 
     GArray* gdb_regs;
     int     gdb_num_regs;

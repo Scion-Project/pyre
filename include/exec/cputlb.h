@@ -24,6 +24,17 @@
 #include "exec/memattrs.h"
 #include "exec/vaddr.h"
 
+/*
+ * Identifies an address space for tlb_switch_asid_ctx(): the target puts every
+ * register value that selects its translation (e.g. TTBR0/TTBR1 including
+ * their ASID fields) in @w. Two address spaces are the same only if all words
+ * are equal.
+ */
+typedef struct TLBCtxKey
+{
+    uint64_t w[12];
+} TLBCtxKey;
+
 #ifdef CONFIG_TCG
 void tlb_protect_code(ram_addr_t ram_addr);
 void tlb_unprotect_code(ram_addr_t ram_addr);
@@ -223,6 +234,44 @@ void tlb_flush_pages_by_mmuidx_all_cpus_synced(CPUState* src_cpu, const TLBFlush
 void tlb_flush_asid_tagged_by_mmuidx(CPUState* cpu, MMUIdxMap idxmap);
 
 /**
+ * tlb_switch_asid_ctx:
+ * @cpu: CPU whose TLB is switching address space (must be the current CPU)
+ * @idxmap: mmu indexes whose ASID-tagged entries belong to the address space
+ * @old_key: the address space being switched away from
+ * @new_key: the address space being switched to
+ *
+ * Use where tlb_flush_asid_tagged_by_mmuidx(@cpu, @idxmap) would be called
+ * because the address space id changed. Instead of discarding the outgoing
+ * address space's entries, keep them aside under @old_key, and if the entries
+ * of @new_key were kept aside earlier, make them current again rather than
+ * starting from an empty TLB.
+ *
+ * Kept-aside TLBs receive every invalidation the live TLB receives (full,
+ * page and range flushes, dirty-tracking resets) while they are kept, so
+ * bringing them back can only produce entries that a TLB tagged with address
+ * space ids could legitimately still hold. The caller must make sure that the
+ * keys capture all translation state that is not otherwise covered by a TLB
+ * flush when it changes.
+ */
+void tlb_switch_asid_ctx(CPUState* cpu, MMUIdxMap idxmap, const TLBCtxKey* old_key, const TLBCtxKey* new_key);
+
+/**
+ * tlb_asid_ctx_enabled:
+ *
+ * Return true if tlb_switch_asid_ctx() may keep TLBs aside (the
+ * "-accel tcg,asid-tlbs=N" property is not 0).
+ */
+bool tlb_asid_ctx_enabled(void);
+
+/* Set the number of TLB context slots per vCPU (0 disables them); "-accel tcg,asid-tlbs=N". */
+#define TLB_ASID_CTX_DEFAULT_SLOTS 8
+#define TLB_ASID_CTX_MAX_SLOTS     16
+void tlb_asid_ctx_set_slots(unsigned n);
+
+/* Number of tlb_switch_asid_ctx() calls on @cpu that found / did not find the incoming TLBs. */
+void tlb_asid_ctx_stats(CPUState* cpu, uint64_t* hits, uint64_t* misses);
+
+/**
  * tlb_code_page_is_global:
  * @cpu: CPU whose TLB to probe
  * @addr: virtual address of an instruction
@@ -273,6 +322,10 @@ static inline void tlb_flush_by_mmuidx(CPUState* cpu, MMUIdxMap idxmap) { }
 static inline void tlb_flush_page_by_mmuidx_all_cpus_synced(CPUState* cpu, vaddr addr, MMUIdxMap idxmap) { }
 static inline void tlb_flush_by_mmuidx_all_cpus_synced(CPUState* cpu, MMUIdxMap idxmap) { }
 static inline void tlb_flush_asid_tagged_by_mmuidx(CPUState* cpu, MMUIdxMap idxmap) { }
+static inline bool tlb_asid_ctx_enabled(void) { return false; }
+static inline void tlb_switch_asid_ctx(CPUState* cpu, MMUIdxMap idxmap, const TLBCtxKey* old_key,
+                                       const TLBCtxKey* new_key)
+{ }
 static inline bool tlb_code_page_is_global(CPUState* cpu, vaddr addr) { return false; }
 static inline void tlb_flush_pages_by_mmuidx_all_cpus_synced(CPUState* cpu, const TLBFlushPage* pages, unsigned n,
                                                              MMUIdxMap idxmap)
