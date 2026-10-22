@@ -82,8 +82,11 @@ jobs:
 
       # Both caches are keyed on build-android.sh: the dependency URLs, sha256
       # sums and build flags all live there, so any change to it invalidates
-      # them. The sysroot's *.pc files hold absolute paths, which stay valid
-      # because the workspace path is stable for this repo.
+      # them. The sysroot's *.pc files hold absolute paths under the runner's
+      # workspace, which includes the repository name, so the key carries
+      # github.repository: a rename (Inferno -> pyre, 2026-10-22) otherwise
+      # restores a sysroot whose paths point at the old checkout and meson's
+      # glib check fails with "glib.h file not found".
       - name: Cache dependency tarballs
         uses: actions/cache@v4.2.0
         with:
@@ -95,7 +98,7 @@ jobs:
         uses: actions/cache@v4.2.0
         with:
           path: ios-on-pixel/native/build/sysroot
-          key: deps-sysroot-${{ runner.os }}-ndk${{ env.ANDROID_NDK_VERSION }}-${{ hashFiles('ios-on-pixel/native/build-android.sh') }}
+          key: deps-sysroot-${{ runner.os }}-${{ github.repository }}-ndk${{ env.ANDROID_NDK_VERSION }}-${{ hashFiles('ios-on-pixel/native/build-android.sh') }}
 
       # `all` = deps + qemu. On a sysroot cache hit only qemu is built (the
       # deps step would otherwise rebuild everything into the restored prefix).
