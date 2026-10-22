@@ -14,6 +14,16 @@
 #include "native-fp.h"
 
 bool arm_native_fp_on;
+/* DEBUG STATS (throwaway): QEMU_NATIVE_FP_STATS=1 prints at exit */
+uint64_t nfp_st_enter, nfp_st_enter_live, nfp_st_fpcr_w, nfp_st_fpcr_nonnative, nfp_st_tb, nfp_st_tb_native, nfp_st_inline;
+static uint64_t nfp_st_fpcr_last_bad;
+static void nfp_stats_print(void)
+{
+    fprintf(stderr, "native-fp stats: enter %" PRIu64 " live %" PRIu64 "; fpcr writes %" PRIu64 " non-native %" PRIu64
+            " (last 0x%" PRIx64 "); A64 TBs %" PRIu64 " NATIVE_FP %" PRIu64 "; inline ops %" PRIu64 "\n",
+            nfp_st_enter, nfp_st_enter_live, nfp_st_fpcr_w, nfp_st_fpcr_nonnative, nfp_st_fpcr_last_bad, nfp_st_tb,
+            nfp_st_tb_native, nfp_st_inline);
+}
 bool arm_native_fp_inline;
 bool arm_native_fp_fault;
 
@@ -98,6 +108,8 @@ void arm_native_fp_exec_enter(CPUARMState* env)
     }
     nfp_in_exec = true;
     want = !(env->vfp.fpcr & ARM_NATIVE_FP_FPCR_MASK);
+    nfp_st_enter++;
+    nfp_st_enter_live += want;
     /*
      * TBs translated with NATIVE_FP emit host FP inline. FPCR writes from
      * guest code rebuild hflags (handle_sys); writes from outside (gdbstub,
@@ -130,6 +142,8 @@ void arm_native_fp_fpcr_written(CPUARMState* env)
 {
     bool want;
 
+    nfp_st_fpcr_w++;
+    if (env->vfp.fpcr & ARM_NATIVE_FP_FPCR_MASK) { nfp_st_fpcr_nonnative++; nfp_st_fpcr_last_bad = env->vfp.fpcr; }
     /* Outside cpu_exec the next arm_native_fp_exec_enter() decides. */
     if (!arm_native_fp_on || !nfp_own_thread(env)) { return; }
     want = !(env->vfp.fpcr & ARM_NATIVE_FP_FPCR_MASK);
@@ -149,6 +163,7 @@ void arm_native_fp_init(void)
 
     if (done || !tcg_native_fp) { return; }
     done                = true;
+    if (getenv("QEMU_NATIVE_FP_STATS")) { atexit(nfp_stats_print); }
     arm_native_fp_fault = tcg_native_fp_fault;
     fpcr                = host_fpcr();
     if (fpcr != 0) {

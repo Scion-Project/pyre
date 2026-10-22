@@ -4551,6 +4551,7 @@ static void nfp_gen_vec(DisasContext* s, bool is_q, MemOp esz, int rd, int rn, i
                         bool fused)
 {
     TCGType  type = is_q ? TCG_TYPE_V128 : TCG_TYPE_V64;
+    extern uint64_t nfp_st_inline; nfp_st_inline++;
     TCGv_vec tn   = tcg_temp_new_vec(type);
     TCGv_vec tm   = tcg_temp_new_vec(type);
     TCGv_vec td   = tcg_temp_new_vec(type);
@@ -4578,6 +4579,7 @@ static void nfp_gen_scalar(DisasContext* s, MemOp esz, int rd, int rn, int rm, i
 {
     TCGv_vec tn = tcg_temp_new_vec(TCG_TYPE_V64);
     TCGv_vec td = tcg_temp_new_vec(TCG_TYPE_V64);
+    extern uint64_t nfp_st_inline; nfp_st_inline++;
 
     tcg_gen_ld_vec(tn, tcg_env, vec_full_reg_offset(s, rn));
     if (nops == 1) { tcg_gen_fp1_vec(esz, td, tn, fop, true); }
@@ -9090,6 +9092,7 @@ static void aarch64_tr_init_disas_context(DisasContextBase* dcbase, CPUState* cp
     dc->fpcr_ah               = EX_TBFLAG_A64(tb_flags, AH);
     dc->fpcr_nep              = EX_TBFLAG_A64(tb_flags, NEP);
     dc->native_fp             = EX_TBFLAG_A64(tb_flags, NATIVE_FP);
+    { extern uint64_t nfp_st_tb, nfp_st_tb_native; nfp_st_tb++; nfp_st_tb_native += dc->native_fp; }
     dc->vec_len               = 0;
     dc->vec_stride            = 0;
     dc->cp_regs               = arm_cpu->cp_regs;
