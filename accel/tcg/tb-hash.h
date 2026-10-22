@@ -55,11 +55,23 @@ static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
             | (((pc >> 2) ^ (pc >> 6)) & TB_JMP_ADDR_MASK));
 }
 
+/*
+ * True if the in-group part of tb_jmp_cache_hash_func() (bits 2 to
+ * TB_JMP_PAGE_BITS + 5 of the PC) lies within the page offset, so a TB at a
+ * given page offset can only be in one slot per group (true for 16 KiB
+ * target pages, as on t8030).
+ */
+static inline bool tb_jmp_cache_slot_in_page(void) { return TARGET_PAGE_BITS >= TB_JMP_PAGE_BITS + 6; }
+
 #else
 
 /* In user-mode we can get better hashing because we do not have a TLB */
 static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 { return (pc ^ (pc >> TB_JMP_CACHE_BITS)) & (TB_JMP_CACHE_SIZE - 1); }
+
+static inline bool tb_jmp_cache_slot_in_page(void) { return false; }
+    #define TB_JMP_PAGE_SIZE 1
+    #define TB_JMP_ADDR_MASK 0
 
 #endif /* CONFIG_SOFTMMU */
 

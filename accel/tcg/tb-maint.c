@@ -740,7 +740,36 @@ static void tb_jmp_cache_inval_tb(TranslationBlock* tb)
     CPUState* cpu;
 
     if (tb_cflags(tb) & CF_PCREL) {
-        /* A TB may be at any virtual address */
+        tb_page_addr_t phys_pc = tb_page_addr0(tb);
+
+        /*
+         * A TB may be at any virtual address, but only at the same offset in
+         * a page: code is only cached from mappings of at least a whole target
+         * page (get_page_addr_code_hostp()), so the virtual and physical PCs
+         * agree in their low TARGET_PAGE_BITS. Where the in-group slot of the
+         * jump cache hash depends only on those bits, the TB can sit in one
+         * slot per group, so check those instead of clearing every vCPU's
+         * whole cache on each invalidation.
+         *
+         * This is a clean-up, not what keeps lookups correct: a lookup never
+         * accepts a TB with CF_INVALID (its cflags no longer match), the same
+         * guarantee the non-PCREL path below relies on when a vCPU refills a
+         * slot concurrently. An entry this misses (say, RAM aliased at an
+         * offset that is not page-aligned) is only a stale slot.
+         */
+        if (tb_jmp_cache_slot_in_page() && phys_pc != -1) {
+            uint32_t slot = tb_jmp_cache_hash_func(phys_pc & ~TARGET_PAGE_MASK) & TB_JMP_ADDR_MASK;
+
+            CPU_FOREACH (cpu) {
+                CPUJumpCache* jc = cpu->tb_jmp_cache;
+
+                if (unlikely(jc == NULL)) { continue; }
+                for (uint32_t h = slot; h < TB_JMP_CACHE_SIZE; h += TB_JMP_PAGE_SIZE) {
+                    if (qatomic_read(&jc->array[h].tb) == tb) { qatomic_set(&jc->array[h].tb, NULL); }
+                }
+            }
+            return;
+        }
         CPU_FOREACH (cpu) { tcg_flush_jmp_cache(cpu); }
     }
     else {
