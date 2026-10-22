@@ -51,6 +51,8 @@ typedef enum SitKind
     SIT_BCOND,
     SIT_CBZ,
     SIT_TBZ,
+    /* rt = the 64-bit CPU state field at offset imm (a system register read with no side effects). */
+    SIT_LDENV,
 } SitKind;
 
 /* SitInsn.mode: addressing mode of a load or store. */

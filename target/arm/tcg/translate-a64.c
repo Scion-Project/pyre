@@ -564,6 +564,23 @@ static SitInsn* sit_ldst(DisasContext* s, SitKind kind, int rt, int rt2, int rn,
     return si;
 }
 
+/*
+ * MRS of a system register that is a plain 64-bit field with no access
+ * check, read function or I/O (e.g. TPIDR_EL0, TPIDRRO_EL0): a load from
+ * the CPU state. Only if this insn has not emitted TCG ops yet.
+ */
+static bool sit_ldenv(DisasContext* s, int rt, int ofs)
+{
+    SitInsn* si;
+
+    if (!sit_admit(s, 0) || tcg_last_op() != s->base.insn_start || ofs < 0 || (ofs & 7)) { return false; }
+    si      = sit_new(s, SIT_LDENV);
+    si->rt  = sit_reg(rt, false);
+    si->imm = ofs;
+    sit_emit(s, si);
+    return true;
+}
+
 /* A conditional branch to @l (taken path): ends the region. */
 static void sit_brcond(DisasContext* s, SitInsn* si, TCGLabel* l)
 {
@@ -2557,6 +2574,11 @@ static void handle_sys(DisasContext* s, bool isread, unsigned int op0, unsigned 
         }
             return;
         default: tcg_debug_assert_not_reached();
+    }
+
+    if (isread && !(ri->type & (ARM_CP_IO | ARM_CP_CONST)) && !ri->readfn && !tcg_ri &&
+        sit_ldenv(s, rt, cpreg_field_offset(s, ri))) {
+        return;
     }
 
     if (ri->type & ARM_CP_IO) {
