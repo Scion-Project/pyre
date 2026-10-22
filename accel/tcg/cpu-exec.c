@@ -30,6 +30,7 @@
 #include "exec/translation-block.h"
 #include "exec/cputlb.h"
 #include "tcg/tcg.h"
+#include "accel/tcg/tb-lookup.h"
 #include "qemu/atomic.h"
 #include "qemu/rcu.h"
 #include "exec/log.h"
@@ -114,6 +115,31 @@ static inline void tb_jmp_cache_set(CPUState* cpu, uint32_t hash, vaddr pc, Tran
     qatomic_set(&jc->array[hash].tb, tb);
 }
 
+/*
+ * Return the TB in @jc's slot @hash if it was translated for exactly @s, else
+ * NULL. The four fields are compared without short-circuiting, so a hit takes
+ * a single branch and the loads from the slot and from the TB can overlap.
+ */
+static inline TranslationBlock* tb_jmp_cache_get(CPUJumpCache* jc, uint32_t hash, TCGTBCPUState s)
+{
+    TranslationBlock* tb = qatomic_read(&jc->array[hash].tb);
+
+    if (likely(tb)) {
+        uint64_t diff = (jc->array[hash].pc ^ s.pc) | (tb->cs_base ^ s.cs_base) | (tb->flags ^ s.flags)
+                        | (tb_cflags(tb) ^ s.cflags);
+
+        if (likely(diff == 0)) {
+            /*
+             * As long as tb is not NULL, the contents are consistent.  Therefore,
+             * the virtual PC has to match for non-CF_PCREL translations.
+             */
+            assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s.pc);
+            return tb;
+        }
+    }
+    return NULL;
+}
+
 /**
  * tb_lookup:
  * @cpu: CPU that will execute the returned translation block
@@ -140,23 +166,14 @@ static inline TranslationBlock* tb_lookup(CPUState* cpu, TCGTBCPUState s)
     hash = tb_jmp_cache_hash_func(s.pc);
     jc   = cpu->tb_jmp_cache;
 
-    tb = qatomic_read(&jc->array[hash].tb);
-    if (likely(tb && jc->array[hash].pc == s.pc && tb->cs_base == s.cs_base && tb->flags == s.flags
-               && tb_cflags(tb) == s.cflags))
-    {
-        goto hit;
-    }
+    tb = tb_jmp_cache_get(jc, hash, s);
+    if (likely(tb)) { return tb; }
 
     tb = tb_htable_lookup(cpu, s);
     if (tb == NULL) { return NULL; }
 
     tb_jmp_cache_set(cpu, hash, s.pc, tb);
 
-hit:
-    /*
-     * As long as tb is not NULL, the contents are consistent.  Therefore,
-     * the virtual PC has to match for non-CF_PCREL translations.
-     */
     assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s.pc);
     return tb;
 }
@@ -241,6 +258,45 @@ static bool check_for_breakpoints_slow(CPUState* cpu, vaddr pc, uint32_t* cflags
 static inline bool check_for_breakpoints(CPUState* cpu, vaddr pc, uint32_t* cflags)
 { return unlikely(!QTAILQ_EMPTY(&cpu->breakpoints)) && check_for_breakpoints_slow(cpu, pc, cflags); }
 
+/*
+ * The part of tcg_lookup_tb_ptr() that is not a plain jump cache hit:
+ * breakpoints, a jump cache miss, or exec logging. The state is passed as
+ * scalars so the hit path never spills it to the stack.
+ */
+static const void* __attribute__((noinline)) tb_lookup_ptr_slow(CPUState* cpu, vaddr pc, uint64_t cs_base,
+                                                                uint32_t flags, uint32_t cflags)
+{
+    TCGTBCPUState     s = {.pc = pc, .flags = flags, .cflags = cflags, .cs_base = cs_base};
+    TranslationBlock* tb;
+
+    if (check_for_breakpoints(cpu, s.pc, &s.cflags)) { cpu_loop_exit(cpu); }
+
+    tb = tb_lookup(cpu, s);
+    if (tb == NULL) { return tcg_code_gen_epilogue; }
+
+    if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) { log_cpu_exec(s.pc, cpu, tb); }
+
+    return tb->tc.ptr;
+}
+
+static inline const void* lookup_tb_ptr(CPUState* cpu, vaddr pc, uint64_t cs_base, uint32_t flags)
+{
+    TCGTBCPUState     s = {.pc = pc, .flags = flags, .cflags = curr_cflags(cpu), .cs_base = cs_base};
+    TranslationBlock* tb;
+
+    /* we should never be trying to look up an INVALID tb */
+    tcg_debug_assert(!(s.cflags & CF_INVALID));
+
+    tb = tb_jmp_cache_get(cpu->tb_jmp_cache, tb_jmp_cache_hash_func(pc), s);
+    if (likely(tb && QTAILQ_EMPTY(&cpu->breakpoints) && !qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC))) {
+        return tb->tc.ptr;
+    }
+    return tb_lookup_ptr_slow(cpu, pc, cs_base, flags, s.cflags);
+}
+
+const void* tcg_lookup_tb_ptr(CPUState* cpu, vaddr pc, uint64_t cs_base, uint32_t flags)
+{ return lookup_tb_ptr(cpu, pc, cs_base, flags); }
+
 /**
  * helper_lookup_tb_ptr: quick check for next tb
  * @env: current cpu state
@@ -251,20 +307,10 @@ static inline bool check_for_breakpoints(CPUState* cpu, vaddr pc, uint32_t* cfla
  */
 const void* HELPER(lookup_tb_ptr)(CPUArchState* env)
 {
-    CPUState*         cpu = env_cpu(env);
-    TranslationBlock* tb;
+    CPUState*     cpu = env_cpu(env);
+    TCGTBCPUState s   = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
 
-    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
-    s.cflags        = curr_cflags(cpu);
-
-    if (check_for_breakpoints(cpu, s.pc, &s.cflags)) { cpu_loop_exit(cpu); }
-
-    tb = tb_lookup(cpu, s);
-    if (tb == NULL) { return tcg_code_gen_epilogue; }
-
-    if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) { log_cpu_exec(s.pc, cpu, tb); }
-
-    return tb->tc.ptr;
+    return lookup_tb_ptr(cpu, s.pc, s.cs_base, s.flags);
 }
 
 /* Return the current PC from CPU, which may be cached in TB. */
