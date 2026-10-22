@@ -2697,7 +2697,7 @@ static void t8030_create_gpu(AppleT8030MachineState* t8030)
     assert_nonnull(gfx_asc);
 
     agx = apple_agx_create(sgx, gfx_asc);
-    object_property_add_child(OBJECT(t8030), "gpu", OBJECT(agx));
+    object_property_add_child(OBJECT(t8030), "agx", OBJECT(agx));
 
     prop = apple_dt_get_prop(gfx_asc, "reg");
     reg  = (uint64_t*)prop->data;
