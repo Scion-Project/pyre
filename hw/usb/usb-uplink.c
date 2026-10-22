@@ -25,6 +25,7 @@
 #include "qom/object.h"
 #include "desc.h"
 #include "hcd-virtualhere.h"
+#include "hw/usb/hcd-net.h"
 #include "hw/usb/usb-uplink.h"
 
 #define USB_CONFIG_DESC_MAX 0x1000
@@ -441,7 +442,22 @@ DeviceState* usb_uplink_new(USBUplinkType type, const char* addr, Error** errp)
     switch (type) {
         case USB_UPLINK_TYPE_INFERNO    : dev = qdev_new(TYPE_USB_INFERNO_HOST); break;
         case USB_UPLINK_TYPE_VIRTUALHERE: dev = qdev_new(TYPE_USB_VIRTUALHERE); break;
+        case USB_UPLINK_TYPE_NET        : dev = qdev_new(TYPE_USB_NET_UPLINK); break;
         default                         : assert_not_reached();
+    }
+
+    if (type == USB_UPLINK_TYPE_NET) {
+        /* For the net uplink, the address names the -netdev to bridge to. */
+        if (addr == NULL) {
+            error_setg(errp, "usb-uplink-type=net needs usb-uplink-addr=<netdev id>");
+            object_unref(OBJECT(dev));
+            return NULL;
+        }
+        if (!object_property_set_str(OBJECT(dev), "netdev", addr, errp)) {
+            object_unref(OBJECT(dev));
+            return NULL;
+        }
+        return dev;
     }
 
     if (addr != NULL) { object_property_set_str(OBJECT(dev), "addr", addr, errp); }
