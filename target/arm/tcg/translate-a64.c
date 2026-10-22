@@ -449,6 +449,8 @@ static const SitLayout a64_sit_layout = {
     .vf    = offsetof(CPUARMState, VF),
     .nf    = offsetof(CPUARMState, NF),
     .zf    = offsetof(CPUARMState, ZF),
+    .vregs   = offsetof(CPUARMState, vfp.zregs[0]),
+    .vstride = sizeof(ARMVectorReg),
 };
 
 /* sit_copy() field uses: SIT_USE_R/W, and whether register 31 is SP (else XZR). */
@@ -544,16 +546,21 @@ static SitInsn* sit_ldst(DisasContext* s, SitKind kind, int rt, int rt2, int rn,
                          int size, SitLoadExt ext, MemOp mop)
 {
     bool     wb = mode == SIT_AM_PRE || mode == SIT_AM_POST;
-    bool     pair = kind == SIT_LDP || kind == SIT_STP;
+    bool     pair = kind == SIT_LDP || kind == SIT_STP || kind == SIT_LDPV || kind == SIT_STPV;
     SitInsn* si;
 
     if (!sit_admit(s, 0) || !tcg_native_int_ldst) { return NULL; }
-    if (wb && rn != 31 && (rn == rt || (pair && rn == rt2))) { return NULL; }
-    if (kind == SIT_LDP && rt == rt2) { return NULL; }
+    bool vec = kind >= SIT_LDV && kind <= SIT_STPV;
+
+    if (vec && (dc_isar_feature(aa64_sve, s) || dc_isar_feature(aa64_sme, s))) {
+        return NULL; /* a SIMD&FP load would also have to clear the SVE part */
+    }
+    if (wb && !vec && rn != 31 && (rn == rt || (pair && rn == rt2))) { return NULL; }
+    if ((kind == SIT_LDP || kind == SIT_LDPV) && rt == rt2) { return NULL; }
     si       = sit_new(s, kind);
-    si->rt   = sit_reg(rt, false);
-    si->rt2  = pair ? sit_reg(rt2, false) : SIT_REG_ZR;
-    si->rn   = rn;
+    si->rt   = vec ? rt : sit_reg(rt, false);
+    si->rt2  = !pair ? SIT_REG_ZR : vec ? rt2 : sit_reg(rt2, false);
+    si->rn   = rn < 0 ? SIT_REG_ZR : rn;
     si->rm   = SIT_REG_ZR;
     si->mode = mode;
     si->imm  = imm;
@@ -2987,6 +2994,24 @@ static bool sit_ldst_reg(DisasContext* s, SitKind kind, arg_ldst* a, SitLoadExt 
     return true;
 }
 
+/* LDR (literal), general-purpose or SIMD&FP: the address is pc_curr + @diff. */
+static bool sit_ldst_lit(DisasContext* s, SitKind kind, int rt, int64_t diff, int size, SitLoadExt ext, MemOp mop)
+{
+    SitInsn* si;
+
+    if (s->pc_save == -1) { return false; }
+    si = sit_ldst(s, kind, rt, 0, -1, SIT_AM_PC, 0, size, ext, mop);
+    if (!si) { return false; }
+    if (tb_cflags(s->base.tb) & CF_PCREL) {
+        si->pcrel = true;
+        si->imm   = (s->pc_curr - s->pc_save) + diff;
+    }
+    else {
+        si->imm = s->pc_curr + diff;
+    }
+    return true;
+}
+
 static bool trans_STXR(DisasContext* s, arg_stxr* a)
 {
     if (a->rn == 31) { gen_check_sp_alignment(s); }
@@ -3075,9 +3100,16 @@ static bool trans_CAS(DisasContext* s, arg_CAS* a)
 static bool trans_LD_lit(DisasContext* s, arg_ldlit* a)
 {
     bool     iss_sf     = ldst_iss_sf(a->sz, a->sign, false);
-    TCGv_i64 tcg_rt     = cpu_reg(s, a->rt);
-    TCGv_i64 clean_addr = tcg_temp_new_i64();
+    TCGv_i64 tcg_rt;
+    TCGv_i64 clean_addr;
     MemOp    memop      = finalize_memop(s, a->sz + a->sign * MO_SIGN);
+
+    if (sit_ldst_lit(s, SIT_LD, a->rt, a->imm, a->sz, a->sign ? SIT_LD_SEXT : SIT_LD_ZEXT, memop)) {
+        sit_syndrome(s, memop, true, a->rt, iss_sf);
+        return true;
+    }
+    tcg_rt     = cpu_reg(s, a->rt);
+    clean_addr = tcg_temp_new_i64();
 
     gen_pc_plus_diff(s, clean_addr, a->imm);
     do_gpr_ld(s, tcg_rt, clean_addr, memop, false, true, a->rt, iss_sf, false);
@@ -3092,6 +3124,7 @@ static bool trans_LD_lit_v(DisasContext* s, arg_ldlit* a)
 
     if (!fp_access_check(s)) { return true; }
     memop      = finalize_memop_asimd(s, a->sz);
+    if (sit_ldst_lit(s, SIT_LDV, a->rt, a->imm, a->sz, SIT_LD_ZEXT, memop)) { return true; }
     clean_addr = tcg_temp_new_i64();
     gen_pc_plus_diff(s, clean_addr, a->imm);
     do_fp_ld(s, a->rt, clean_addr, memop);
@@ -3234,6 +3267,9 @@ static bool trans_STP_v(DisasContext* s, arg_ldstpair* a)
 
     /* LSE2 does not merge FP pairs; leave these as separate operations. */
     mop = finalize_memop_asimd(s, a->sz);
+    if (sit_ldst(s, SIT_STPV, a->rt, a->rt2, a->rn, sit_mode(a->p, a->w), offset, a->sz, SIT_LD_ZEXT, mop)) {
+        return true;
+    }
     op_addr_ldstpair_pre(s, a, &clean_addr, &dirty_addr, offset, true, mop);
     do_fp_st(s, a->rt, clean_addr, mop);
     tcg_gen_addi_i64(clean_addr, clean_addr, 1 << a->sz);
@@ -3252,6 +3288,9 @@ static bool trans_LDP_v(DisasContext* s, arg_ldstpair* a)
 
     /* LSE2 does not merge FP pairs; leave these as separate operations. */
     mop = finalize_memop_asimd(s, a->sz);
+    if (sit_ldst(s, SIT_LDPV, a->rt, a->rt2, a->rn, sit_mode(a->p, a->w), offset, a->sz, SIT_LD_ZEXT, mop)) {
+        return true;
+    }
     op_addr_ldstpair_pre(s, a, &clean_addr, &dirty_addr, offset, false, mop);
     do_fp_ld(s, a->rt, clean_addr, mop);
     tcg_gen_addi_i64(clean_addr, clean_addr, 1 << a->sz);
@@ -3380,6 +3419,9 @@ static bool trans_STR_v_i(DisasContext* s, arg_ldst_imm* a)
 
     if (!fp_access_check(s)) { return true; }
     mop = finalize_memop_asimd(s, a->sz);
+    if (sit_ldst(s, SIT_STV, a->rt, 0, a->rn, sit_mode(a->p, a->w), a->imm, a->sz, SIT_LD_ZEXT, mop)) {
+        return true;
+    }
     op_addr_ldst_imm_pre(s, a, &clean_addr, &dirty_addr, a->imm, true, mop);
     do_fp_st(s, a->rt, clean_addr, mop);
     op_addr_ldst_imm_post(s, a, dirty_addr, a->imm);
@@ -3393,6 +3435,9 @@ static bool trans_LDR_v_i(DisasContext* s, arg_ldst_imm* a)
 
     if (!fp_access_check(s)) { return true; }
     mop = finalize_memop_asimd(s, a->sz);
+    if (sit_ldst(s, SIT_LDV, a->rt, 0, a->rn, sit_mode(a->p, a->w), a->imm, a->sz, SIT_LD_ZEXT, mop)) {
+        return true;
+    }
     op_addr_ldst_imm_pre(s, a, &clean_addr, &dirty_addr, a->imm, false, mop);
     do_fp_ld(s, a->rt, clean_addr, mop);
     op_addr_ldst_imm_post(s, a, dirty_addr, a->imm);
@@ -3462,6 +3507,7 @@ static bool trans_LDR_v(DisasContext* s, arg_ldst* a)
     if (!fp_access_check(s)) { return true; }
 
     memop = finalize_memop_asimd(s, a->sz);
+    if (sit_ldst_reg(s, SIT_LDV, a, SIT_LD_ZEXT, memop)) { return true; }
     op_addr_ldst_pre(s, a, &clean_addr, &dirty_addr, false, memop);
     do_fp_ld(s, a->rt, clean_addr, memop);
     return true;
@@ -3477,6 +3523,7 @@ static bool trans_STR_v(DisasContext* s, arg_ldst* a)
     if (!fp_access_check(s)) { return true; }
 
     memop = finalize_memop_asimd(s, a->sz);
+    if (sit_ldst_reg(s, SIT_STV, a, SIT_LD_ZEXT, memop)) { return true; }
     op_addr_ldst_pre(s, a, &clean_addr, &dirty_addr, true, memop);
     do_fp_st(s, a->rt, clean_addr, memop);
     return true;
