@@ -27,22 +27,28 @@ typedef union CPUTLBEntry
     struct
     {
         uintptr_t addr_read;
-        uintptr_t addr_write;
-        uintptr_t addr_code;
         /*
          * Addend to virtual address to get host address.  IO accesses
-         * use the corresponding iotlb value.
+         * use the corresponding iotlb value.  It sits between addr_read
+         * and addr_write so that the TCG fast path can load either
+         * comparator together with the addend in one load-pair
+         * instruction (tcg/aarch64).
          */
         uintptr_t addend;
+        uintptr_t addr_write;
+        uintptr_t addr_code;
     };
     /*
      * Padding to get a power of two size, as well as index
-     * access to addr_{read,write,code}.
+     * access to addr_{read,write,code}: see TLB_CMP_IDX.
      */
     uintptr_t addr_idx[(1 << CPU_TLB_ENTRY_BITS) / sizeof(uintptr_t)];
 } CPUTLBEntry;
 
 QEMU_BUILD_BUG_ON(sizeof(CPUTLBEntry) != (1 << CPU_TLB_ENTRY_BITS));
+
+/* Index of the comparator for MMUAccessType @t in CPUTLBEntry.addr_idx. */
+    #define TLB_CMP_IDX(t) ((t) + ((t) != 0))
 
 /*
  * Data elements that are per MMU mode, accessed by the fast path.
