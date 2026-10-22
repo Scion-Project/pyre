@@ -13,6 +13,9 @@
  *   4    x18, x29 and x30 as ordinary operands and load destinations
  *   5    NZCV set before a page-crossing (slow-path) load and store and
  *        consumed after them
+ *   8    SIMD&FP loads in a region: a Q load and a pair that cross a 16 KiB
+ *        page (slow path), and a Q load that faults: the destination stays
+ *        unchanged and the registers written before it are exact
  *   7    MRS TPIDR_EL0 / TPIDRRO_EL0 (plain field reads) in the middle of
  *        ALU code, after MSR TPIDR_EL0 at EL0 and TPIDRRO_EL0 set at EL1
  *   6    a store over code later in the same block (the store's slow
@@ -70,6 +73,9 @@
     .text
     .globl _start
 _start:
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)                  /* FPEN: SIMD&FP at EL0 */
+    msr     cpacr_el1, x0
     adr     x0, vectors
     msr     vbar_el1, x0
     ldr     x0, =EL1_SP
@@ -306,6 +312,32 @@ fault2:
     CHK     x10, 0x1111, 6
     CHK     x15, 0x1111 - 0x2222, 6
     CHK     x17, 1, 6
+
+    /* 8: SIMD&FP loads and stores */
+    LI      x0, BUF + 0x4000 - 8                /* 16 bytes across a 16 KiB page */
+    LI      x1, 0x1111222233334444
+    LI      x2, 0x5555666677778888
+    stp     x1, x2, [x0]
+    ldr     q0, [x0]
+    ldp     d1, d2, [x0]
+    str     q0, [x0, #-64]
+    ldp     x3, x4, [x0, #-64]
+    fmov    x5, d1
+    fmov    x6, d2
+    CHK     x3, 0x1111222233334444, 8
+    CHK     x4, 0x5555666677778888, 8
+    CHK     x5, 0x1111222233334444, 8
+    CHK     x6, 0x5555666677778888, 8
+    movi    v3.2d, #0xffffffffffffffff
+    LI      x9, HOLE + 0x200
+    movz    x10, #0x2a
+    add     x11, x10, #1
+fault8:
+    ldr     q3, [x9]
+    CHKSAVE 11, 0x2b, 8
+    CHKSAVE 31, HOLE + 0x200, 8
+    fmov    x12, d3
+    CHK     x12, 0xffffffffffffffff, 8          /* destination unchanged */
 
     /* 7: TLS register reads in the middle of a block */
     LI      x0, 0x0123456789abcdef
