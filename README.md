@@ -1,43 +1,72 @@
-# ChefKiss Inferno ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/ChefKissInc/Inferno/build.yaml?style=for-the-badge) ![Written by humans, not AI](https://img.shields.io/badge/written_by_humans-not_ai-blue?style=for-the-badge)
+# Pyre ![CI](https://img.shields.io/github/actions/workflow/status/dylanneve1/pyre/build.yaml?style=for-the-badge)
 
-Cross-platform Apple ARM device emulation, based on very heavily-modified QEMU code.
+Apple-silicon device emulation for Android phones. Pyre is the engine behind
+[ios-on-pixel](https://github.com/dylanneve1/ios-on-pixel): an emulated iPhone 11
+(t8030, A13) running on a Google Pixel 10, with an A14 (t8101) machine in progress.
 
-> [!CAUTION]
-> Please consider donating/tipping to help continue the project's development,
-> keeping it free and open-source.
->
-> PayPal or credit/debit card: https://ko-fi.com/chefkiss
->
-> BTC: `bc1qgu56kptepex2csuzl5nhzc4vxuj8c6ggjzhcem`
->
-> SOL: `4PJU3iB5rimN9BNcpzduvmTnptJyedZiAd23so33SAdi`
->
-> ETH: `0x038A25849c23Bc5A736484351a8B6Ad71bC46676`
+It is a fork of [ChefKiss Inferno](https://github.com/ChefKissInc/Inferno), itself a
+heavily modified QEMU. Upstream's machine models, boot flow and kernel patch set are
+the foundation; everything below is what Pyre adds on top, developed in the open with
+one PR per change and numbers attached.
 
-## More info and usage
+## What Pyre adds
 
-Please see [here](https://chefkiss.dev/applehax/inferno/) for more information about the project and how to use it.
+**Faster CPU emulation (TCG), measured on the iOS 14.8 restore boot**
 
-## Legal Disclaimers
+| Change | Where | Effect |
+|---|---|---|
+| Jump-cache fast path, storage-only sysreg writes no longer end a TB, PC-relative TB invalidation clears 64 slots not 16k | `accel/tcg`, `hw/arm/a13_gxf.c` | hot returns −29%, ~⅔ of 496k TB exits per boot gone |
+| GXF-banked EL1 registers as plain fields | `hw/arm/a13_gxf.c` | TPIDR_EL1 read 24 ns → <1 ns |
+| Guest floating point on the host FPU, inline from the arm64 backend, bit-exact with a 426 768-case startup self-test and softfloat fallback | `target/arm/tcg`, `tcg/aarch64`, `docs/NATIVE-FP.md` | vector FP microbench 46×, Linux `mem` 3.7×, `simd` 2.1× |
+| ASID-tagged TLB contexts (TLBs and jump caches kept across address-space switches) | `accel/tcg/cputlb.c`, `docs/ASID-TLB.md` | KPTI syscall loop 6.1×; `-accel tcg,asid-tlbs=0` restores old behaviour |
+| Softmmu fast path 10 → 8 host instructions; TLB floor 64 → 1024 entries; cheaper dirty reset | `tcg/aarch64`, `docs/SOFTMMU.md` | boot −5%, host CPU −7% |
+| Placeholder SEP ROMs park the SEP core instead of spinning | `hw/arm/sep/rom-idle.c` | idle host CPU 0.7 → 0.07 cores |
 
-“ChefKiss Inferno” is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose and noninfringement.
+Together: restore boot 19.75 s → 13.1 s and host CPU 21 → 11 s per boot on the
+reference emulator, with iOS 14 behaviour unchanged. Method and tables:
+[ios-on-pixel/docs/PERF.md](https://github.com/dylanneve1/ios-on-pixel/blob/main/docs/PERF.md).
 
-By using this software, you acknowledge that you are solely responsible for how you use it. The “ChefKiss Inferno” project team is not responsible for any damage, legal issues, data loss, or other consequences arising from its use.
+**Reliability.** A kernel pattern patch fixes a ~3% boot-time panic caused by a race
+in the display driver's simulator check (`hw/arm/kernel_patches.c`).
 
-This project is intended for lawful purposes only. Users are responsible for complying with all applicable laws, licenses, and agreements, including copyright, trademark, and End User License Agreements (EULAs).
+**Testing without Apple software.** `-M a13-test` is a firmware-free A13 bench:
+bare-metal register tests, GXF/SPTM register round-trips, TCG microbenchmarks
+(`hw/arm/tests/`, `run-a13-tests.py`, `run-a13-bench.py`), plus host unit tests
+(`run-host-tests.sh`). CI runs them on Linux and macOS, and cross-builds the Android
+library on every PR.
 
-The “ChefKiss Inferno” project team does not condone or support piracy, copyright infringement, or any illegal activity.
+**Work in progress, each behind an opt-in switch**
 
-This derivative project (“ChefKiss Inferno”) is licensed under the GNU General Public License, version 3, with our own code licensed under the GNU Affero General Public License, version 3. See `LICENSE` for details.
+- **iOS 27 / SPTM+TXM**: the SPTM/GXF register set, SPTM and TXM loading and the
+  iBoot-style image layout SPTM checks (`-M t8030,sptm=…,txm=…`). Status and gaps:
+  [ios-on-pixel/docs/IOS27.md](https://github.com/dylanneve1/ios-on-pixel/blob/main/docs/IOS27.md).
+- **GPU (A13 "G12P")**: milestone 0 scaffold, `-M t8030,gpu=on` — the guest's GPU
+  driver matches and starts against an emulated coprocessor; firmware handshake in
+  progress. Plan: `docs/GPU-EMULATION-SCOPE.md`.
+- **A14 / t8101 (iPhone 12)**: per-SoC constant tables and the new machine, kernel to
+  serial first. Plan: `docs/T8101-SCOPE.md`.
+- **Near-native direction**: `docs/SAME-ISA-FASTPATH.md` quantifies where a same-ISA
+  (arm64-on-arm64) translation tier would land and what it costs.
 
-This was done due to other entities shadowing the project with proprietary, paid solutions based mostly verbatim on this project.
+## Building for Android
 
-The parts of QEMU which are licensed under the "version 2 or later" clause retain their original license restrictions and copyright holders.
+Pyre is consumed as the `third_party/inferno` submodule of ios-on-pixel, whose
+`native/build-android.sh` cross-compiles it and its static dependencies with the NDK.
+Host builds use the usual `meson setup build && ninja -C build` (see upstream's
+documentation for machine options).
 
-The parts that are not will be removed in subsequent commits, you may explicitly contact us for early/faster removal of your code if desired.
+## Ground rules
 
-Restrictions apply for the branding of the “ChefKiss Inferno” project, see [here](./ui/icons/CKBrandingNotice.md).
+Same as ios-on-pixel's [ETHICS.md](https://github.com/dylanneve1/ios-on-pixel/blob/main/docs/ETHICS.md):
+no Apple firmware, keys, images or instructions for obtaining them live here; only
+structural facts needed to emulate hardware. Guest security monitors keep running and
+enforcing; the emulator implements the hardware, it does not change the guest.
 
-QEMU is a copyright and trademark of Fabrice Bellard. QEMU, Fabrice Bellard, and the QEMU developers are unaffiliated with this project.
+## Licence and attribution
 
-Apple, Inc. is unaffiliated with this project. 
+Pyre is a derivative of ChefKiss Inferno and keeps its licensing: GPL-3.0 for the
+QEMU-derived parts, AGPL-3.0 for Inferno's own code, and Pyre's additions are
+AGPL-3.0 too. See `LICENSE`. The “ChefKiss Inferno” name and artwork are theirs;
+their branding notice is honoured (`ui/icons/CKBrandingNotice.md`) and the name
+is used here only to credit upstream. Code brought in from other GPL projects keeps
+its original copyright headers. QEMU's own licensing is unchanged.
