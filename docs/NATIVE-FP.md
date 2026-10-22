@@ -9,7 +9,11 @@ are all Arm rules on both sides). Background, profile and the PoC are in
 [SAME-ISA-FASTPATH.md](SAME-ISA-FASTPATH.md); FP/SIMD-heavy guest code spends
 62-79% of its time in softfloat.
 
-Default: **off**. Turn it on with `-accel tcg,native-fp=on`.
+Default: **on** wherever it applies (AArch64 hosts); `-accel tcg,native-fp=off`
+turns it off. With the default QEMU only reports problems (a failed host
+self-test, an unexpected host FPCR); with an explicit `native-fp=on` it also
+reports the outcome (`native-fp: on (...)` or `not available on this host`).
+See "Validation" at the end for what the default rests on.
 
 ## When the host FPU is used
 
@@ -17,8 +21,8 @@ All of the following must hold; otherwise the instruction runs on softfloat,
 exactly as with `native-fp=off`.
 
 1. **Host.** The QEMU binary is built for AArch64 (macOS on Apple silicon,
-   Linux/Android arm64). On any other host the option only prints
-   `native-fp: not available on this host` and has no effect.
+   Linux/Android arm64). On any other host the option has no effect (an
+   explicit `native-fp=on` prints `native-fp: not available on this host`).
 2. **Host FP mode.** The host FPCR is 0 (round to nearest even, no FZ, FZ16,
    DN, AH, FIZ, no trap enables) when QEMU starts; QEMU never changes it. A
    vCPU thread that finds it non-zero resets it to 0 (with a warning).
@@ -33,8 +37,8 @@ exactly as with `native-fp=off`.
    bits and the IOC/DZC/OFC/UFC/IXC flags must be identical (426768 cases,
    about 0.1 s once at startup on Apple M1).
    Any difference prints `native-fp: host self-test failed: <case>` and the
-   whole run stays on softfloat. On success QEMU prints
-   `native-fp: on (host self-test passed, N cases)`.
+   whole run stays on softfloat. On success an explicit `native-fp=on`
+   prints `native-fp: on (host self-test passed, N cases)`.
 4. **Guest FP mode.** The guest FPCR selects the same mode as the host:
    RMode = 00 (round to nearest even), FZ = 0, DN = 0 (IEEE NaN propagation,
    not default-NaN), FPCR.AH = 0 (the Arm NaN-propagation, tininess and
@@ -172,3 +176,34 @@ Variants:
   softfloat, native-fp and the host hardware agree three ways.
 
 `x-native-fp-fault` and `x-native-fp-selftest` are test-only.
+
+## Validation
+
+Everything below is in CI or reproducible with the scripts named.
+
+* Bit-exactness: the host self-test (426768 cases) and `fp_native_check`
+  on every CI host (Linux x86-64/arm64, macOS arm64/x86-64) and in the
+  Android emulator; on the AArch64 hosts softfloat, native-fp (inline and
+  helpers-only) and the host CPU itself give the same hashes
+  (`e421108006d5ca6e`, sticky FPSR `c6159aad366011df`).
+* iOS 14 restore boot (t8030, research kernel, Android emulator "iop", 4
+  vCPUs, CI Android build of #33, 10 interleaved rounds of native-fp off
+  and on, `restore_bench.py`): with native-fp on, 10/10 boots reached
+  "waiting for host" with the same milestones and no panic (median
+  waiting_host 13.7 s, off 13.8 s). One "off" boot hit the intermittent
+  `Kernel data abort` at pc 0xfffffff0099126d4 that also appears in
+  baseline builds without native-fp (it predates this work).
+* Engagement during that boot (debug counters, not in the tree): every
+  `cpu_exec` entry was in the native regime (FPCR was 0 throughout, 36 FPCR
+  writes, none non-native), 163738 of 163741 A64 TBs were translated with
+  `NATIVE_FP`, and 1002 FP operations were emitted inline. The restore boot
+  is barely FP, so it validates the mode and flag machinery under iOS rather
+  than FP throughput; the FP-heavy numbers are below.
+* Performance (same binary, off / helpers only / inline, median of 5): in
+  the Android emulator, `w7` (register-only vector FMLA/FMUL/FADD, 48M ops)
+  3.72 s / 0.99 s / 0.08 s, `w8` (scalar FP mix) 0.71 / 0.62 / 0.31 s, `w4`
+  (ALU control) 2.86 / 2.93 / 2.92 s. Linux guest on the M1 host (upstream
+  10.2.2 with this code ported): `mem` 6.26 / 1.72 / 1.70 s, `simd` 7.06 /
+  3.45 / 3.37 s (native: 0.22 and 0.32 s); a profile of the inline runs
+  shows no softfloat or FP helper left, the rest is the TCG memory path and
+  generated code. Startup cost of the self-test: about 0.05-0.1 s, once.
