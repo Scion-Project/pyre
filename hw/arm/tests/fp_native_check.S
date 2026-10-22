@@ -8,10 +8,17 @@
  * result bits and the FPSR after the operation (cleared before it) are folded
  * into a 64-bit FNV-style hash, printed in hex on the test-control PUTC
  * register, then the test reports PASS. Run it with and without
- * QEMU_TCG_NATIVE_FP=1: the two hashes must be identical.
+ * QEMU_TCG_NATIVE_FP=1: the two hashes must be identical. Build with -DSTICKY
+ * as well (FPSR never cleared) to check cumulative-flag accumulation.
  *
  * Architectural encodings only; no Apple code or data.
  */
+/* -DSTICKY: never clear FPSR, so the hash also covers cumulative-flag accumulation */
+#ifdef STICKY
+#define CLEAR_FPSR nop
+#else
+#define CLEAR_FPSR msr fpsr, xzr
+#endif
     .set CTL_BASE,    0x200000000
     .set CTL_STATUS,  0x08
     .set CTL_PUTC,    0x10
@@ -42,13 +49,13 @@ _start:
     mov     v1.d[1], v2.d[0]
     mov     v2.d[1], v0.d[0]
     .irp op, fadd, fsub, fmul
-    msr     fpsr, xzr
+    CLEAR_FPSR
     \op    v3.2d, v0.2d, v1.2d
     bl      mix_v3
     .endr
     .irp op, fmla, fmls
     mov     v3.16b, v2.16b
-    msr     fpsr, xzr
+    CLEAR_FPSR
     \op    v3.2d, v0.2d, v1.2d
     bl      mix_v3
     .endr
@@ -81,13 +88,13 @@ _start:
     mov     v2.s[2], v1.s[0]
     mov     v2.s[3], v0.s[0]
     .irp op, fadd, fsub, fmul
-    msr     fpsr, xzr
+    CLEAR_FPSR
     \op    v3.4s, v0.4s, v1.4s
     bl      mix_v3
     .endr
     .irp op, fmla, fmls
     mov     v3.16b, v2.16b
-    msr     fpsr, xzr
+    CLEAR_FPSR
     \op    v3.4s, v0.4s, v1.4s
     bl      mix_v3
     .endr
