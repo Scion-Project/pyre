@@ -136,6 +136,7 @@
 
 #define ANS_SIZE   (0x3D24000)
 #define SIO_SIZE   (0x114000)
+#define GFX_SIZE   (0x400000)
 #define PANIC_SIZE (0x100000)
 
 #define AMCC_BASE                               (0x200000000)
@@ -967,7 +968,13 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
 
     t8030_rtkit_mem_setup(t8030, ca, "sio", "iop-sio-nub", SIO_SIZE);
     t8030_rtkit_mem_setup(t8030, ca, "ans", "iop-ans-nub", ANS_SIZE);
-    if (t8030->gpu) { t8030_gpu_mem_setup(t8030, ca); }
+    if (t8030->gpu) {
+        /* RTBuddy(GFX) resumes the HLE'd firmware only when the nub has a
+         * firmware region; without one it tries to load an image and panics
+         * in _attemptFirmwareLoad. Nothing runs there. */
+        t8030_rtkit_mem_setup(t8030, ca, "gfx-asc", "iop-gfx-nub", GFX_SIZE);
+        t8030_gpu_mem_setup(t8030, ca);
+    }
 
     if (t8030->sep_rom_filename) {
         if (!g_file_get_contents(t8030->sep_rom_filename, &seprom, &fsize, NULL)) {
