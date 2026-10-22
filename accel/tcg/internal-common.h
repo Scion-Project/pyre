@@ -11,6 +11,8 @@
 #include "exec/cpu-common.h"
 #include "exec/translation-block.h"
 #include "accel/tcg/tb-cpu-state.h"
+#include "qemu/log.h"
+#include "hw/core/cpu.h"
 
 extern bool one_insn_per_tb;
 
@@ -42,8 +44,31 @@ void tlb_destroy(CPUState* cpu);
 bool tcg_exec_realizefn(CPUState* cpu, Error** errp);
 void tcg_exec_unrealizefn(CPUState* cpu);
 
-/* current cflags for hashing/comparison */
-uint32_t curr_cflags(CPUState* cpu);
+/*
+ * Current cflags for hashing/comparison. Inline: it runs on every TB lookup,
+ * including each indirect branch (helper_lookup_tb_ptr).
+ */
+static inline uint32_t curr_cflags(CPUState* cpu)
+{
+    uint32_t cflags = cpu->tcg_cflags;
+
+    /*
+     * Record gdb single-step.  We should be exiting the TB by raising
+     * EXCP_DEBUG, but to simplify other tests, disable chaining too.
+     *
+     * For singlestep and -d nochain, suppress goto_tb so that
+     * we can log -d cpu,exec after every TB.
+     */
+    if (unlikely(cpu->singlestep_enabled)) { cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR | CF_SINGLE_STEP | 1; }
+    else if (unlikely(qatomic_read(&one_insn_per_tb))) {
+        cflags |= CF_NO_GOTO_TB | 1;
+    }
+    else if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_NOCHAIN))) {
+        cflags |= CF_NO_GOTO_TB;
+    }
+
+    return cflags;
+}
 
 void tb_check_watchpoint(CPUState* cpu, uintptr_t retaddr);
 
