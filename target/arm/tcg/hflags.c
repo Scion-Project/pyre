@@ -11,6 +11,7 @@
 #include "cpu-features.h"
 #include "exec/translation-block.h"
 #include "accel/tcg/cpu-ops.h"
+#include "accel/tcg/tb-lookup.h"
 #include "cpregs.h"
 
 #define HELPER_H "tcg/helper.h"
@@ -400,9 +401,8 @@ static void assert_hflags_rebuild_correctly(CPUARMState* env)
 #endif
 }
 
-TCGTBCPUState arm_get_tb_cpu_state(CPUState* cs)
+static inline TCGTBCPUState arm_tb_cpu_state(CPUARMState* env)
 {
-    CPUARMState*  env = cpu_env(cs);
     CPUARMTBFlags flags;
     vaddr         pc;
 
@@ -440,4 +440,18 @@ TCGTBCPUState arm_get_tb_cpu_state(CPUState* cs)
         .flags   = flags.flags,
         .cs_base = flags.flags2,
     };
+}
+
+TCGTBCPUState arm_get_tb_cpu_state(CPUState* cs) { return arm_tb_cpu_state(cpu_env(cs)); }
+
+/*
+ * helper_lookup_tb_ptr() for A32 and A64 TBs, with the TB state computed
+ * inline rather than through an indirect call to arm_get_tb_cpu_state().
+ * Runs on every indirect branch and cross-page direct branch.
+ */
+const void* HELPER(arm_lookup_tb_ptr)(CPUARMState* env)
+{
+    TCGTBCPUState s = arm_tb_cpu_state(env);
+
+    return tcg_lookup_tb_ptr(env_cpu(env), s.pc, s.cs_base, s.flags);
 }

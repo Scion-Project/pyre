@@ -74,6 +74,15 @@ void tcg_gen_goto_tb(unsigned idx);
  */
 void tcg_gen_lookup_and_goto_ptr(void);
 
+/**
+ * tcg_gen_lookup_and_goto_ptr_via() - tcg_gen_lookup_and_goto_ptr() with a
+ * target-specific lookup helper
+ * @gen_lookup: emits a call to a helper with the contract of
+ *              helper_lookup_tb_ptr (typically one that computes the TB state
+ *              inline and then calls tcg_lookup_tb_ptr())
+ */
+void tcg_gen_lookup_and_goto_ptr_via(void (*gen_lookup)(TCGv_ptr ret, TCGv_env env));
+
 /* 32 bit ops */
 
 void tcg_gen_movi_i32(TCGv_i32 ret, int32_t arg);
