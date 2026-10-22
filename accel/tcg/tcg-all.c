@@ -93,6 +93,7 @@ bool tcg_native_int;
 bool tcg_native_int_explicit;
 bool tcg_native_int_ldst = true;
 bool tcg_native_int_el1;
+bool tcg_native_int_fault;
 
 static int tcg_init_machine(AccelState* as, MachineState* ms)
 {
@@ -303,6 +304,8 @@ static void tcg_set_native_int(Object* obj, bool value, Error** errp)
 }
 static bool tcg_get_native_int_ldst(Object* obj, Error** errp) { return tcg_native_int_ldst; }
 static void tcg_set_native_int_ldst(Object* obj, bool value, Error** errp) { tcg_native_int_ldst = value; }
+static bool tcg_get_native_int_fault(Object* obj, Error** errp) { return tcg_native_int_fault; }
+static void tcg_set_native_int_fault(Object* obj, bool value, Error** errp) { tcg_native_int_fault = value; }
 static bool tcg_get_native_int_el1(Object* obj, Error** errp) { return tcg_native_int_el1; }
 static void tcg_set_native_int_el1(Object* obj, bool value, Error** errp) { tcg_native_int_el1 = value; }
 
@@ -365,6 +368,9 @@ static void tcg_accel_class_init(ObjectClass* oc, const void* data)
     object_class_property_add_bool(oc, "x-native-int-el1", tcg_get_native_int_el1, tcg_set_native_int_el1);
     object_class_property_set_description(oc, "x-native-int-el1",
                                           "Experimental: native-int at EL1 too (measurement only)");
+    object_class_property_add_bool(oc, "x-native-int-fault", tcg_get_native_int_fault, tcg_set_native_int_fault);
+    object_class_property_set_description(oc, "x-native-int-fault",
+                                          "Test only: native-int slow paths skip writing back guest registers");
 }
 
 static const TypeInfo tcg_accel_type = {
