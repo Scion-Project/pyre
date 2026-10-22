@@ -155,6 +155,23 @@ static const char* KEEP_COMP[] = {
     "mic-temp-sens,ica60\0$",
     "aapl,spmi\0$",
     "accbuck,fan53740\0$",
+    /*
+     * t8101 (iPhone 12, d53g): the nodes its T1 device set covers. None of
+     * these strings occur in the t8030 device tree.
+     */
+    "D53gAP\0iPhone13,2\0AppleARM\0$",
+    "D53gDEV\0iPhone13,2\0AppleARM\0$",
+    "apple,icestorm\0ARM,v8\0$",
+    "apple,firestorm\0ARM,v8\0$",
+    "arm-io,t8101\0$",
+    "pmgr1,t8101\0$",
+    "wdt,t8101\0wdt,s5l8960x\0$",
+    "gpio,t8101\0$",
+    "iop,ascwrap-v4\0$",
+    "iop-sep,ascwrap-v4\0$",
+    "sart,t8101\0$",
+    "rsm,t8101\0$",
+    "i2c,t8101\0i2c,s5l8940x\0iic,soft\0$",
 };
 
 static const char* REM_NAMES[] = {

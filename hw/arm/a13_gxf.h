@@ -26,3 +26,5 @@
 void apple_a13_init_gxf(AppleA13State* cpu);
 
 void apple_a13_init_gxf_override(AppleA13State* cpu);
+
+void apple_a14_init_gxf(AppleA13State* cpu);

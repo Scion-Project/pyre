@@ -41,6 +41,16 @@ TESTS = [
     ("gxf_banked_el1 (negative control)", "gxf_banked_el1_test.S", ["-DNEGATIVE_CONTROL"], ("mismatch", 31)),
 ]
 
+# Apple A14 core (t8101): a14_cpu_test.S on the Firestorm and Icestorm cores,
+# and the A13 core must not have the A14 MIDR (check 2 mismatches).
+A14_TESTS = [
+    ("a14_cpu (firestorm)", "a14_cpu_test.S", [], "pass", {"machine": "a13-test,core=firestorm"}),
+    ("a14_cpu (icestorm)", "a14_cpu_test.S", ["-DICESTORM"], "pass", {"machine": "a13-test,core=icestorm"}),
+    ("a14_cpu (negative control)", "a14_cpu_test.S", ["-DNEGATIVE_CONTROL"], ("undef", 28),
+     {"machine": "a13-test,core=firestorm"}),
+    ("a14_cpu (negative control: A13 core)", "a14_cpu_test.S", [], ("mismatch", 2), {}),
+]
+
 # Guest FP on the host FPU (-accel tcg,native-fp=on, docs/NATIVE-FP.md).
 # fp_native_check.S embeds the softfloat hash; it must come out the same
 # with native-fp off and on. The host self-test must catch an injected
@@ -134,8 +144,8 @@ def build(src, flags, workdir, tag):
     return img
 
 
-def run(qemu, img, accel=None):
-    cmd = [qemu, "-M", "a13-test", "-display", "none", "-monitor", "none", "-serial", "none", "-kernel", img]
+def run(qemu, img, accel=None, machine="a13-test"):
+    cmd = [qemu, "-M", machine, "-display", "none", "-monitor", "none", "-serial", "none", "-kernel", img]
     if accel:
         cmd += ["-accel", "tcg," + accel]
     try:
@@ -178,7 +188,7 @@ def main():
         return 2
     qemu = sys.argv[1]
     failures = 0
-    tests = [t + ({},) for t in TESTS] + ASID_TESTS + FP_TESTS
+    tests = [t + ({},) for t in TESTS] + A14_TESTS + ASID_TESTS + FP_TESTS
     total = skipped = 0
     with tempfile.TemporaryDirectory() as workdir:
         for i, (name, src, flags, expect, opts) in enumerate(tests):
@@ -188,7 +198,7 @@ def main():
                 continue
             total += 1
             img = build(src, flags, workdir, f"t{i}")
-            code, out = run(qemu, img, opts.get("accel"))
+            code, out = run(qemu, img, opts.get("accel"), opts.get("machine", "a13-test"))
             ok, why = judge(expect, code, out)
             if ok and opts.get("need") and opts["need"] not in out:
                 ok, why = False, f"{why}, but QEMU did not report '{opts['need']}'"
