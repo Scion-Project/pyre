@@ -17,7 +17,8 @@
 # Register use: x0-x17, x19-x21 random; x22 scratch for the hash; x23 hash;
 # x24 code anchor (ADR/ADRP results are made relative to it); x25 index
 # scratch; x26-x28 buffer pointers (moved by pre/post-index forms within
-# their windows); x18, x29, x30 and sp unused (platform register, frame).
+# their windows); x29 keeps nic_body's return address while x30 serves BLR/RET;
+# x18 and sp unused (platform register, stack).
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -381,6 +382,26 @@ class Gen:
                 self.ldst(wb=False)
         self.out.append(f"9{n}:")
 
+    def indirect(self):
+        """BR over a few instructions, or BLR to a local function that RETs (x30 is free: x29 keeps nic_body's)."""
+        r = self.r
+        self.label += 1
+        n = self.label
+        if r.random() < 0.5:
+            self.emit(f"adr x25, 9{n}f")
+            self.emit("br x25")
+            for _ in range(r.randint(0, 2)):
+                self.alu()
+        else:
+            self.emit(f"adr x25, 7{n}f")
+            self.emit("blr x25")
+            self.emit(f"b 9{n}f")
+            self.out.append(f"7{n}:")
+            for _ in range(r.randint(1, 4)):
+                self.alu()
+            self.emit("ret")
+        self.out.append(f"9{n}:")
+
     def fold(self):
         for n in self.r.sample(POOL, 6):
             self.emit(f"eor x23, x23, x{n}")
@@ -388,6 +409,7 @@ class Gen:
 
     def program(self, n):
         r = self.r
+        self.out.append("    mov x29, x30")
         self.out.append("    adr x24, nic_body")
         self.movimm(23, r.getrandbits(64))
         for b in (26, 27, 28):
@@ -406,8 +428,10 @@ class Gen:
                 self.alu()
             elif p < 0.85:
                 self.ldst()
-            elif p < 0.93:
+            elif p < 0.90:
                 self.branch()
+            elif p < 0.93:
+                self.indirect()
             else:
                 self.other()
             i += 1
@@ -427,6 +451,7 @@ class Gen:
         # buffer base back from x26's final offset, for nic_hash_buffer
         self.movimm(25, BASES[26][0] + self.off[26])
         self.emit("sub x0, x26, x25")
+        self.emit("mov x30, x29")
         return "\n".join(self.out) + "\n"
 
 

@@ -313,6 +313,19 @@ const void* HELPER(lookup_tb_ptr)(CPUArchState* env)
     return lookup_tb_ptr(cpu, s.pc, s.cs_base, s.flags);
 }
 
+/*
+ * The miss path of translator_lookup_and_goto_ptr()'s inline jump-cache
+ * probe: the generated code has already looked in the jump cache and knows
+ * the TB state (that of the TB it belongs to), so go straight to the slow
+ * part.
+ */
+const void* HELPER(lookup_tb_ptr_miss)(CPUArchState* env, uint64_t pc, uint64_t cs_base, uint32_t flags)
+{
+    CPUState* cpu = env_cpu(env);
+
+    return tb_lookup_ptr_slow(cpu, pc, cs_base, flags, curr_cflags(cpu));
+}
+
 /* Return the current PC from CPU, which may be cached in TB. */
 static vaddr log_pc(CPUState* cpu, const TranslationBlock* tb)
 {
