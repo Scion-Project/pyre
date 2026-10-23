@@ -13,12 +13,14 @@
 #include "exec/cpu-common.h"
 
 /*
- * 16384 entries: 64 page groups of 256 (see tb-hash.h). With 4096 entries
- * (64 x 64) XNU's hot kernel pages hold more indirect-branch targets than a
- * group has slots, and most misses were two targets in the same page evicting
- * each other.
+ * 32768 entries: 128 page groups of 256 (see tb-hash.h), 512 KiB per vCPU.
+ * With 4096 entries (64 x 64) XNU's hot kernel pages hold more
+ * indirect-branch targets than a group has slots, and most misses were two
+ * targets in the same page evicting each other. 16384 (64 x 256) still left
+ * two thirds of the misses in a full iOS boot to two pages of the same group
+ * sharing a slot; 32768 cuts those by 28% and all misses by 16%.
  */
-#define TB_JMP_CACHE_BITS 14
+#define TB_JMP_CACHE_BITS 15
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
 
 /*
