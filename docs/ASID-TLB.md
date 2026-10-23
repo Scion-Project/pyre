@@ -80,7 +80,7 @@ real flushes). This also needed `n_used_entries` to be exact (#37): it used
 to wrap below zero and make TLBs double for no reason.
 
 Only the EL1&0 regime uses it (not HCR_EL2.{E2H,TGE} = 11), and only for
-AArch64 TTBR writes. Memory: one jump cache (258 KiB) per used slot, and
+AArch64 TTBR writes. Memory: one jump cache (516 KiB) per used slot, and
 the slot's TLB arrays.
 
 ## Knobs
