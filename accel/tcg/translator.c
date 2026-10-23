@@ -20,6 +20,7 @@
 #include "tb-internal.h"
 #include "tb-hash.h"
 #include "hw/core/cpu.h"
+#include "exec/helper-gen-common.h"
 
 bool translator_io_start(DisasContextBase* db)
 {
@@ -66,7 +67,9 @@ static void gen_tb_end(const TranslationBlock* tb, uint32_t cflags, int num_insn
  * done inline in the generated code: hash the pc, load the cache entry,
  * check its pc and the TB's cs_base, flags and cflags against those of the
  * TB being translated, check for breakpoints, and jump to its code. Anything
- * else (a miss, another TB state, breakpoints) calls @gen_lookup as before.
+ * else (a miss, another TB state, breakpoints) calls helper_lookup_tb_ptr_miss(),
+ * which skips the state computation and the jump-cache probe that @gen_lookup
+ * would repeat.
  *
  * Only valid when the CPU state at this exit is the state of the TB being
  * translated (@db->tb flags and cs_base) and its cflags are the vCPU's
@@ -138,8 +141,10 @@ void translator_lookup_and_goto_ptr(DisasContextBase* db, TCGv_i64 pc, void (*ge
     tcg_gen_ld_ptr(code, tbp, offsetof(TranslationBlock, tc.ptr));
     tcg_gen_goto_ptr(code);
 
+    /* A miss: the slow lookup, with the pc and the TB state we already have. */
     gen_set_label(slow);
-    tcg_gen_lookup_and_goto_ptr_via(gen_lookup);
+    gen_helper_lookup_tb_ptr_miss(code, tcg_env, pc, tcg_constant_i64(tb->cs_base), tcg_constant_i32(tb->flags));
+    tcg_gen_goto_ptr(code);
 }
 
 bool translator_is_same_page(const DisasContextBase* db, vaddr addr)
