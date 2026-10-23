@@ -2986,6 +2986,8 @@ void tcg_gen_goto_tb(unsigned idx)
     tcg_gen_op1i(INDEX_op_goto_tb, 0, idx);
 }
 
+void tcg_gen_goto_ptr(TCGv_ptr ptr) { tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr)); }
+
 void tcg_gen_lookup_and_goto_ptr_via(void (*gen_lookup)(TCGv_ptr ret, TCGv_env env))
 {
     TCGv_ptr ptr;

@@ -160,6 +160,20 @@ void translator_loop(CPUState* cpu, TranslationBlock* tb, int* max_insns, vaddr 
 bool translator_use_goto_tb(DisasContextBase* db, vaddr dest);
 
 /**
+ * translator_lookup_and_goto_ptr
+ * @db: disassembly context
+ * @pc: the guest pc to continue at
+ * @gen_lookup: the target's lookup helper, as for tcg_gen_lookup_and_goto_ptr_via()
+ *
+ * An indirect jump to the TB for @pc with the jump-cache hit inline. Only for
+ * exits where the CPU's TB state (flags, cs_base) is still that of @db->tb.
+ */
+struct TCGv_i64_d;
+struct TCGv_ptr_d;
+void translator_lookup_and_goto_ptr(DisasContextBase* db, struct TCGv_i64_d* pc,
+                                    void (*gen_lookup)(struct TCGv_ptr_d*, struct TCGv_ptr_d*));
+
+/**
  * translator_io_start
  * @db: Disassembly context
  *

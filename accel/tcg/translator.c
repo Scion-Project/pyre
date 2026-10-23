@@ -18,6 +18,9 @@
 #include "tcg/tcg-op-common.h"
 #include "internal-common.h"
 #include "tb-internal.h"
+#include "tb-hash.h"
+#include "hw/core/cpu.h"
+#include "exec/helper-gen-common.h"
 
 bool translator_io_start(DisasContextBase* db)
 {
@@ -56,6 +59,92 @@ static void gen_tb_end(const TranslationBlock* tb, uint32_t cflags, int num_insn
         gen_set_label(tcg_ctx->exitreq_label);
         tcg_gen_exit_tb(tb, TB_EXIT_REQUESTED);
     }
+}
+
+/*
+ * Look up the TB for the guest pc in @pc and jump to it, like
+ * tcg_gen_lookup_and_goto_ptr_via(@gen_lookup), but with the jump-cache hit
+ * done inline in the generated code: hash the pc, load the cache entry,
+ * check its pc and the TB's cs_base, flags and cflags against those of the
+ * TB being translated, check for breakpoints, and jump to its code. Anything
+ * else (a miss, another TB state, breakpoints) calls helper_lookup_tb_ptr_miss(),
+ * which skips the state computation and the jump-cache probe that @gen_lookup
+ * would repeat.
+ *
+ * Only valid when the CPU state at this exit is the state of the TB being
+ * translated (@db->tb flags and cs_base) and its cflags are the vCPU's
+ * current ones: the caller asserts the former; the latter is checked here.
+ * The jump-cache hit in C (lookup_tb_ptr()) costs a helper call and some 70
+ * host instructions; this is about 25. -accel tcg,x-inline-lookup=off keeps
+ * the helper for every lookup.
+ */
+void translator_lookup_and_goto_ptr(DisasContextBase* db, TCGv_i64 pc, void (*gen_lookup)(TCGv_ptr, TCGv_env))
+{
+    const TranslationBlock* tb = db->tb;
+    TCGLabel*               slow;
+    TCGv_ptr                jc, ent, tbp, code;
+    TCGv_i64                h, t, v;
+    int                     shift = TARGET_PAGE_BITS - TB_JMP_PAGE_BITS;
+
+    if (!tcg_inline_lookup || (tb_cflags(tb) & CF_NO_GOTO_PTR) || tb_cflags(tb) != curr_cflags(tcg_ctx->cpu) ||
+        qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
+        tcg_gen_lookup_and_goto_ptr_via(gen_lookup);
+        return;
+    }
+
+    slow = gen_new_label();
+    h    = tcg_temp_new_i64();
+    t    = tcg_temp_new_i64();
+    v    = tcg_temp_new_i64();
+    jc   = tcg_temp_new_ptr();
+    ent  = tcg_temp_new_ptr();
+    tbp  = tcg_temp_new_ptr();
+    code = tcg_temp_new_ptr();
+
+    /* h = tb_jmp_cache_hash_func(pc) */
+    QEMU_BUILD_BUG_ON(sizeof(((CPUJumpCache*)0)->array[0]) != 16);
+    tcg_gen_shri_i64(t, pc, shift);
+    tcg_gen_xor_i64(t, t, pc);
+    tcg_gen_shri_i64(t, t, shift);
+    tcg_gen_andi_i64(t, t, TB_JMP_PAGE_MASK);
+    tcg_gen_shri_i64(h, pc, 2);
+    tcg_gen_shri_i64(v, pc, 6);
+    tcg_gen_xor_i64(h, h, v);
+    tcg_gen_andi_i64(h, h, TB_JMP_ADDR_MASK);
+    tcg_gen_or_i64(h, h, t);
+    tcg_gen_shli_i64(h, h, 4);
+
+    /* the entry: tb, pc */
+    tcg_gen_ld_ptr(jc, tcg_env, offsetof(CPUState, tb_jmp_cache) - sizeof(CPUState));
+    tcg_gen_trunc_i64_ptr(ent, h);
+    tcg_gen_add_ptr(ent, ent, jc);
+    tcg_gen_ld_ptr(tbp, ent, offsetof(CPUJumpCache, array[0].tb));
+    tcg_gen_ld_i64(t, ent, offsetof(CPUJumpCache, array[0].pc));
+    tcg_gen_brcondi_ptr(TCG_COND_EQ, tbp, 0, slow);
+    tcg_gen_brcond_i64(TCG_COND_NE, t, pc, slow);
+
+    /* the TB's state: cs_base, flags, cflags */
+    tcg_gen_ld_i64(t, tbp, offsetof(TranslationBlock, cs_base));
+    tcg_gen_xori_i64(t, t, tb->cs_base);
+    tcg_gen_ld32u_i64(v, tbp, offsetof(TranslationBlock, flags));
+    tcg_gen_xori_i64(v, v, tb->flags);
+    tcg_gen_or_i64(t, t, v);
+    tcg_gen_ld32u_i64(v, tbp, offsetof(TranslationBlock, cflags));
+    tcg_gen_xori_i64(v, v, tb_cflags(tb));
+    tcg_gen_or_i64(t, t, v);
+    tcg_gen_brcondi_i64(TCG_COND_NE, t, 0, slow);
+
+    /* no breakpoints (they need the C path's checks) */
+    tcg_gen_ld_ptr(jc, tcg_env, offsetof(CPUState, breakpoints.tqh_first) - sizeof(CPUState));
+    tcg_gen_brcondi_ptr(TCG_COND_NE, jc, 0, slow);
+
+    tcg_gen_ld_ptr(code, tbp, offsetof(TranslationBlock, tc.ptr));
+    tcg_gen_goto_ptr(code);
+
+    /* A miss: the slow lookup, with the pc and the TB state we already have. */
+    gen_set_label(slow);
+    gen_helper_lookup_tb_ptr_miss(code, tcg_env, pc, tcg_constant_i64(tb->cs_base), tcg_constant_i32(tb->flags));
+    tcg_gen_goto_ptr(code);
 }
 
 bool translator_is_same_page(const DisasContextBase* db, vaddr addr)

@@ -16,6 +16,10 @@
  *   8    SIMD&FP loads in a region: a Q load and a pair that cross a 16 KiB
  *        page (slow path), and a Q load that faults: the destination stays
  *        unchanged and the registers written before it are exact
+ *   9    an indirect branch to code whose TB for EL1 is in the jump cache
+ *        (el_probe, called with BLR at EL1 first): at EL0 the lookup must
+ *        not take the EL1 TB (the inline jump-cache probe checks the TB
+ *        state, not just the pc), so its MRS TPIDR_EL1 traps
  *   7    MRS TPIDR_EL0 / TPIDRRO_EL0 (plain field reads) in the middle of
  *        ALU code, after MSR TPIDR_EL0 at EL0 and TPIDRRO_EL0 set at EL1
  *   6    a store over code later in the same block (the store's slow
@@ -134,6 +138,8 @@ _start:
 
     ldr     x0, =0x7070707070707070
     msr     tpidrro_el0, x0
+    adr     x0, el_probe                        /* test 9: its EL1 TB into the jump cache */
+    blr     x0
     ldr     x0, =BUF
     msr     sp_el0, x0
     adr     x0, el0_main
@@ -156,7 +162,10 @@ el1_sync:
     cmp     x1, #0x15                           /* SVC */
     b.eq    el1_svc
     cmp     x1, #0x24                           /* data abort from EL0 */
+    b.eq    1f
+    cmp     x1, #0x00                           /* UNDEF from EL0 (test 9) */
     b.ne    el1_fail
+1:
     ldr     x0, =SAVE
     stp     x2, x3, [x0, #2 * 8]
     stp     x4, x5, [x0, #4 * 8]
@@ -338,6 +347,19 @@ fault8:
     CHKSAVE 31, HOLE + 0x200, 8
     fmov    x12, d3
     CHK     x12, 0xffffffffffffffff, 8          /* destination unchanged */
+    /* 9: the EL0 lookup of el_probe must not reuse its EL1 TB */
+    LI      x27, SAVE
+    str     xzr, [x27, #34 * 8]
+    adr     x9, el_probe
+    blr     x9
+    CHKSAVE 34, 0x02000000, 9                   /* ESR: EC 0 (UNDEF), IL */
+    adr     x26, el_probe
+    LI      x27, SAVE
+    ldr     x27, [x27, #32 * 8]                 /* ELR */
+    cmp     x27, x26
+    b.eq    2f
+    svc     #9
+2:
 
     /* 7: TLS register reads in the middle of a block */
     LI      x0, 0x0123456789abcdef
@@ -353,6 +375,11 @@ fault8:
     CHK     x6, 0x0123456789abcdef, 7
 
     svc     #0
+
+/* test 9: MRS TPIDR_EL1 works at EL1 and traps at EL0 */
+el_probe:
+    mrs     x0, tpidr_el1
+    ret
 
 /* copied to CODE; x11 = the new instruction, x12 = where it goes */
 smc_snip:
