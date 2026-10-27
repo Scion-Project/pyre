@@ -48,7 +48,7 @@ jobs:
       - name: Checkout ios-on-pixel (build script)
         uses: actions/checkout@v4.2.2
         with:
-          repository: dylanneve1/ios-on-pixel
+          repository: Scion-Project/scion
           ref: ${{ env.IOS_ON_PIXEL_REF }}
           path: ios-on-pixel
           # Its third_party/inferno submodule is not needed: INFERNO_SRC points
