@@ -1,7 +1,7 @@
-# Pyre ![CI](https://img.shields.io/github/actions/workflow/status/dylanneve1/pyre/build.yaml?style=for-the-badge)
+# Pyre ![CI](https://img.shields.io/github/actions/workflow/status/Scion-Project/pyre/build.yaml?style=for-the-badge)
 
 Apple-silicon device emulation for Android phones. Pyre is the engine behind
-[ios-on-pixel](https://github.com/dylanneve1/ios-on-pixel): an emulated iPhone 11
+[Scion](https://github.com/Scion-Project/scion): an emulated iPhone 11
 (t8030, A13) running on a Google Pixel 10, with an A14 (t8101) machine in progress.
 
 It is a fork of [ChefKiss Inferno](https://github.com/ChefKissInc/Inferno), itself a
@@ -24,7 +24,7 @@ one PR per change and numbers attached.
 
 Together: restore boot 19.75 s → 13.1 s and host CPU 21 → 11 s per boot on the
 reference emulator, with iOS 14 behaviour unchanged. Method and tables:
-[ios-on-pixel/docs/PERF.md](https://github.com/dylanneve1/ios-on-pixel/blob/main/docs/PERF.md).
+[scion/docs/PERF.md](https://github.com/Scion-Project/scion/blob/main/docs/PERF.md).
 
 **Reliability.** A kernel pattern patch fixes a ~3% boot-time panic caused by a race
 in the display driver's simulator check (`hw/arm/kernel_patches.c`).
@@ -39,7 +39,7 @@ library on every PR.
 
 - **iOS 27 / SPTM+TXM**: the SPTM/GXF register set, SPTM and TXM loading and the
   iBoot-style image layout SPTM checks (`-M t8030,sptm=…,txm=…`). Status and gaps:
-  [ios-on-pixel/docs/IOS27.md](https://github.com/dylanneve1/ios-on-pixel/blob/main/docs/IOS27.md).
+  [scion/docs/IOS27.md](https://github.com/Scion-Project/scion/blob/main/docs/IOS27.md).
 - **GPU (A13 "G12P")**: milestone 0 scaffold, `-M t8030,gpu=on` — the guest's GPU
   driver matches and starts against an emulated coprocessor; firmware handshake in
   progress. Plan: `docs/GPU-EMULATION-SCOPE.md`.
@@ -50,14 +50,14 @@ library on every PR.
 
 ## Building for Android
 
-Pyre is consumed as the `third_party/inferno` submodule of ios-on-pixel, whose
+Pyre is consumed as the `third_party/inferno` submodule of Scion, whose
 `native/build-android.sh` cross-compiles it and its static dependencies with the NDK.
 Host builds use the usual `meson setup build && ninja -C build` (see upstream's
 documentation for machine options).
 
 ## Ground rules
 
-Same as ios-on-pixel's [ETHICS.md](https://github.com/dylanneve1/ios-on-pixel/blob/main/docs/ETHICS.md):
+Same as Scion's [ETHICS.md](https://github.com/Scion-Project/scion/blob/main/docs/ETHICS.md):
 no Apple firmware, keys, images or instructions for obtaining them live here; only
 structural facts needed to emulate hardware. Guest security monitors keep running and
 enforcing; the emulator implements the hardware, it does not change the guest.
