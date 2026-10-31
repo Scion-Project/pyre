@@ -301,6 +301,9 @@ AudiodevPerDirectionOptions* glue(audio_get_pdo_, TYPE)(Audiodev* dev)
 {
     switch (dev->driver) {
         case AUDIODEV_DRIVER_NONE: return dev->u.none.TYPE;
+#ifdef CONFIG_AUDIO_AAUDIO
+        case AUDIODEV_DRIVER_AAUDIO: return qapi_AudiodevAaudioPerDirectionOptions_base(dev->u.aaudio.TYPE);
+#endif
 #ifdef CONFIG_AUDIO_ALSA
         case AUDIODEV_DRIVER_ALSA: return qapi_AudiodevAlsaPerDirectionOptions_base(dev->u.alsa.TYPE);
 #endif
