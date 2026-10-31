@@ -131,6 +131,11 @@ DEF("audiodev", HAS_ARG, QEMU_OPTION_audiodev,
     "                in|out.buffer-length= length of buffer in microseconds\n"
     "-audiodev none,id=id,[,prop[=value][,...]]\n"
     "                dummy driver that discards all output\n"
+#ifdef CONFIG_AUDIO_AAUDIO
+    "-audiodev aaudio,id=id[,prop[=value][,...]]\n"
+    "                out.low-latency= ask for the low-latency path (default on)\n"
+    "                out.exclusive= ask for an exclusive (MMAP) stream (default off)\n"
+#endif
 #ifdef CONFIG_AUDIO_ALSA
     "-audiodev alsa,id=id[,prop[=value][,...]]\n"
     "                in|out.dev= name of the audio device to use\n"

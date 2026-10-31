@@ -131,6 +131,43 @@
     '*latency':   'uint32'} }
 
 ##
+# @AudiodevAaudioPerDirectionOptions:
+#
+# Options of the AAudio backend that are used for both playback and
+# recording.
+#
+# @low-latency: ask for AAUDIO_PERFORMANCE_MODE_LOW_LATENCY (default
+#     true)
+#
+# @exclusive: ask for AAUDIO_SHARING_MODE_EXCLUSIVE, the MMAP path
+#     where the device supports it (default false)
+#
+# Since: 10.2
+##
+{ 'struct': 'AudiodevAaudioPerDirectionOptions',
+  'base': 'AudiodevPerDirectionOptions',
+  'data': {
+    '*low-latency': 'bool',
+    '*exclusive':   'bool' } }
+
+##
+# @AudiodevAaudioOptions:
+#
+# Options of the AAudio (Android) audio backend.  Only playback is
+# implemented.
+#
+# @in: options of the capture stream
+#
+# @out: options of the playback stream
+#
+# Since: 10.2
+##
+{ 'struct': 'AudiodevAaudioOptions',
+  'data': {
+    '*in':  'AudiodevAaudioPerDirectionOptions',
+    '*out': 'AudiodevAaudioPerDirectionOptions' } }
+
+##
 # @AudiodevCoreaudioPerDirectionOptions:
 #
 # Options of the Core Audio backend that are used for both playback
@@ -447,12 +484,15 @@
 #
 # An enumeration of possible audio backend drivers.
 #
+# @aaudio: Android AAudio backend (since 10.2)
+#
 # @jack: JACK audio backend (since 5.1)
 #
 # Since: 4.0
 ##
 { 'enum': 'AudiodevDriver',
   'data': [ 'none',
+            { 'name': 'aaudio', 'if': 'CONFIG_AUDIO_AAUDIO' },
             { 'name': 'alsa', 'if': 'CONFIG_AUDIO_ALSA' },
             { 'name': 'coreaudio', 'if': 'CONFIG_AUDIO_COREAUDIO' },
             { 'name': 'dsound', 'if': 'CONFIG_AUDIO_DSOUND' },
@@ -486,6 +526,8 @@
   'discriminator': 'driver',
   'data': {
     'none':      'AudiodevGenericOptions',
+    'aaudio':    { 'type': 'AudiodevAaudioOptions',
+                   'if': 'CONFIG_AUDIO_AAUDIO' },
     'alsa':      { 'type': 'AudiodevAlsaOptions',
                    'if': 'CONFIG_AUDIO_ALSA' },
     'coreaudio': { 'type': 'AudiodevCoreaudioOptions',
