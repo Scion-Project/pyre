@@ -967,6 +967,21 @@ if not get_option('alsa').auto() or (host_os == 'linux' and have_system)
   alsa = dependency('alsa', required: get_option('alsa'),
                     method: 'pkg-config')
 endif
+# Android's AAudio (NDK API 26+). The Android build cross-compiles with
+# system = 'linux', so detect it by the NDK header rather than host_os.
+aaudio = not_found
+if not get_option('aaudio').auto() or (have_system and cc.has_header('aaudio/AAudio.h'))
+  aaudio = cc.find_library('aaudio', has_headers: ['aaudio/AAudio.h'],
+                           required: get_option('aaudio'))
+  if aaudio.found() and not cc.has_header_symbol('aaudio/AAudio.h',
+                                                 'AAudioStreamBuilder_setDataCallback',
+                                                 dependencies: aaudio)
+    aaudio = not_found
+    if get_option('aaudio').enabled()
+      error('AAudio needs Android API level 26 or later')
+    endif
+  endif
+endif
 jack = not_found
 if not get_option('jack').auto() or have_system
   jack = dependency('jack', required: get_option('jack'),
@@ -1589,6 +1604,7 @@ config_host_data = configuration_data()
 audio_drivers_selected = []
 if have_system
   audio_drivers_available = {
+    'aaudio': aaudio.found(),
     'alsa': alsa.found(),
     'coreaudio': coreaudio.found(),
     'dsound': dsound.found(),
@@ -1605,7 +1621,7 @@ if have_system
 
   # Default to native drivers first, OSS second, SDL third
   audio_drivers_priority = \
-    [ 'pa', 'coreaudio', 'dsound', 'sndio', 'oss' ] + \
+    [ 'aaudio', 'pa', 'coreaudio', 'dsound', 'sndio', 'oss' ] + \
     (host_os == 'linux' ? [] : [ 'sdl' ])
   audio_drivers_default = []
   foreach k: audio_drivers_priority
@@ -3473,6 +3489,7 @@ if host_os == 'linux'
 endif
 summary_info += {'PipeWire support':  pipewire}
 summary_info += {'JACK support':      jack}
+summary_info += {'AAudio support':    aaudio}
 summary(summary_info, bool_yn: true, section: 'Audio backends')
 
 # Network backends
