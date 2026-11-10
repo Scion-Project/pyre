@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Guest integer code as host instructions (`-accel tcg,native-int=on`)
 
 On an AArch64 host, TCG can execute covered AArch64 guest EL0 integer

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Guest floating point on the host FPU (`-accel tcg,native-fp=on`)
 
 On an AArch64 host, TCG can execute some AArch64 guest floating-point

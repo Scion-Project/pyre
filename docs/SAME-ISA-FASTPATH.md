@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Same-ISA fast path: how close to native can TCG get on an AArch64 host?
 
 Status: research note and design proposal. Nothing here changes the emulator;
