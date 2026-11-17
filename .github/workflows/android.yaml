@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT-0
 # Cross-builds qemu-system-aarch64 for Android arm64 (the binary the
 # ios-on-pixel app ships), so emulator PRs to master are checked against the
 # real target toolchain and not only the upstream Linux/macOS host builds in

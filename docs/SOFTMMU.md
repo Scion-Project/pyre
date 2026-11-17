@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Softmmu memory path: what a guest load/store costs, and what was cut
 
 Status: #39 (fast path) and #40 (TLB floor, `tlb_reset_dirty`) merged.

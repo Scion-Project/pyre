@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT-0
 # Weekly check for new commits on upstream ChefKissInc/Inferno (dev and master).
 # For each upstream branch that has commits our master lacks, it pushes the
 # upstream tip to `upstream-sync/<branch>` and opens (or refreshes) a PR that
